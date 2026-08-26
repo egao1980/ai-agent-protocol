@@ -120,20 +120,17 @@
 
 (defun auto-skip-tool (condition)
   "HANDLER-BIND: SKIP-TOOL on tool/unknown-tool errors."
-  (if (find-restart 'skip-tool condition)
-      (invoke-skip-tool condition)
-      (error condition)))
+  (when (find-restart 'skip-tool condition)
+    (invoke-skip-tool condition)))
 
 (defun auto-pause-approval (condition)
   "HANDLER-BIND: PAUSE-FOR-APPROVAL (existing HITL run-state)."
-  (if (find-restart 'pause-for-approval condition)
-      (invoke-pause-for-approval condition)
-      (error condition)))
+  (when (find-restart 'pause-for-approval condition)
+    (invoke-pause-for-approval condition)))
 
 (defun auto-retry (condition)
-  (if (find-restart 'retry condition)
-      (invoke-retry condition)
-      (error condition)))
+  (when (find-restart 'retry condition)
+    (invoke-retry condition)))
 
 (defmacro with-auto-skip-tool (&body body)
   `(handler-bind ((agent-tool-error #'auto-skip-tool)

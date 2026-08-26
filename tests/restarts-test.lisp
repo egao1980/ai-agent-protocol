@@ -52,17 +52,17 @@
 
 (deftest generate-retry
   (with-agent-loop
-    (let ((n 0)
-          (backend (make-mock-llm-backend
-                    :handler (lambda (b turns &key &allow-other-keys)
-                               (declare (ignore b turns))
-                               (incf n)
-                               (if (= n 1)
-                                   (error 'llm-protocol:llm-http-error
-                                          :status 429 :message "rate" :retryable-p t)
-                                   (make-llm-response
-                                    :parts (list (make-llm-text-part :text "recovered"))
-                                    :finish-reason :stop))))))
+    (let* ((n 0)
+           (backend (make-mock-llm-backend
+                     :handler (lambda (b turns &key &allow-other-keys)
+                                (declare (ignore b turns))
+                                (incf n)
+                                (if (= n 1)
+                                    (error 'llm-protocol:llm-http-error
+                                           :status 429 :message "rate" :retryable-p t)
+                                    (make-llm-response
+                                     :parts (list (make-llm-text-part :text "recovered"))
+                                     :finish-reason :stop))))))
       (let* ((agent (make-ai-agent :name "x" :backend backend))
              (run (handler-bind ((agent-generate-error
                                   (lambda (c)
