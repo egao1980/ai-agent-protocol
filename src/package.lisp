@@ -6,11 +6,37 @@
   (:export
    #:agent-error
    #:agent-error-message
+   #:agent-error-run
    #:agent-missing-loop
    #:agent-timeout
    #:agent-canceled
    #:agent-unknown-tool
    #:agent-unknown-tool-name
+   #:agent-tool-error
+   #:agent-tool-error-invocation
+   #:agent-tool-error-cause
+   #:agent-tool-error-name
+   #:agent-generate-error
+   #:agent-generate-error-step
+   #:agent-generate-error-cause
+   #:agent-max-steps
+   #:agent-approval-required
+   #:agent-approval-required-invocation
+   #:call-with-agent-restarts
+   #:with-agent-restarts
+   #:invoke-retry
+   #:invoke-use-value
+   #:invoke-skip-tool
+   #:invoke-approve
+   #:invoke-deny
+   #:invoke-pause-for-approval
+   #:invoke-continue-run
+   #:invoke-abort-run
+   #:auto-skip-tool
+   #:auto-pause-approval
+   #:auto-retry
+   #:with-auto-skip-tool
+   #:with-auto-pause-approval
 
    #:ai-agent
    #:ai-agent-p

@@ -31,6 +31,19 @@
   (funcall callback run)
   run)
 
+(defun %check-canceled (run callback)
+  "T when the run finished as :canceled. CONTINUE-RUN skips the finish."
+  (when (%canceled-p run)
+    (let ((act (restart-case
+                   (progn
+                     (signal 'agent-canceled :run run :message "agent run canceled")
+                     :finish)
+                 (continue-run () :continue)
+                 (abort-run () :finish))))
+      (when (eq act :finish)
+        (%finish run :canceled callback)
+        t))))
+
 (defun %handoff-for (run name)
   (find name (ai-agent-handoffs (agent-run-agent run))
         :key #'ai-agent-name :test #'equal))
@@ -82,9 +95,22 @@
        (setf (agent-invocation-status inv) :handoff
              (agent-invocation-source inv) (%handoff-for run name)))
       ((null source)
-       (setf (agent-invocation-status inv) :error
-             (agent-invocation-error-p inv) t
-             (agent-invocation-result inv) (format nil "unknown tool ~s" name)))
+       (let ((act (restart-case
+                      (progn
+                        (signal 'agent-unknown-tool
+                                :run run :name name
+                                :message (format nil "unknown tool ~s" name))
+                        :skip)
+                    (use-value (result)
+                      (setf (agent-invocation-status inv) :done
+                            (agent-invocation-result inv)
+                            (if (stringp result) result (princ-to-string result)))
+                      :used)
+                    (skip-tool () :skip))))
+         (when (eq act :skip)
+           (setf (agent-invocation-status inv) :error
+                 (agent-invocation-error-p inv) t
+                 (agent-invocation-result inv) (format nil "unknown tool ~s" name)))))
       ((not (tool-executable-p source name))
        (setf (agent-invocation-status inv) :deferred))
       ((agent-approve-p (agent-run-agent run) source name args)
@@ -93,17 +119,39 @@
        (setf (agent-invocation-status inv) :approved)))
     inv))
 
+(defun %offer-approval (run inv)
+  (when (eq (agent-invocation-status inv) :proposed)
+    (restart-case
+        (signal 'agent-approval-required :run run :invocation inv)
+      (approve ()
+        (setf (agent-invocation-status inv) :approved))
+      (deny ()
+        (setf (agent-invocation-status inv) :denied
+              (agent-invocation-result inv) "denied"
+              (agent-invocation-error-p inv) nil))
+      (pause-for-approval ()
+        nil))))
+
 (defun %after-invocations (run callback error-callback)
   (%record-terminal-invocations run)
+  (dolist (inv (agent-run-invocations run))
+    (when (eq (agent-invocation-status inv) :proposed)
+      (%offer-approval run inv)))
   (let ((pending (remove-if-not
                   (lambda (i)
                     (member (agent-invocation-status i)
                             '(:proposed :deferred) :test #'eq))
-                  (agent-run-invocations run))))
+                  (agent-run-invocations run)))
+        (ready (remove-if-not
+                (lambda (i)
+                  (and (eq (agent-invocation-status i) :approved)
+                       (not (agent-invocation-recorded-p i))))
+                (agent-run-invocations run))))
     (setf (agent-run-pending run) pending)
     (cond
-      ((%canceled-p run)
-       (%finish run :canceled callback))
+      ((%check-canceled run callback))
+      (ready
+       (%invoke-ready run ready callback error-callback))
       (pending
        (%finish run
                 (if (find :deferred pending :key #'agent-invocation-status)
@@ -138,17 +186,37 @@
                                                      (princ-to-string result)))
                                            (one-done))
                                :error-callback (lambda (c)
-                                                 (setf (agent-invocation-status inv) :error
-                                                       (agent-invocation-error-p inv) t
-                                                       (agent-invocation-result inv)
-                                                       (princ-to-string c))
-                                                 (one-done))))))))
+                                                 (let ((act
+                                                        (restart-case
+                                                            (progn
+                                                              (signal 'agent-tool-error
+                                                                      :run run
+                                                                      :invocation inv
+                                                                      :cause c
+                                                                      :name (agent-invocation-name inv)
+                                                                      :message (princ-to-string c))
+                                                              :skip)
+                                                          (use-value (result)
+                                                            (setf (agent-invocation-status inv) :done
+                                                                  (agent-invocation-error-p inv) nil
+                                                                  (agent-invocation-result inv)
+                                                                  (if (stringp result)
+                                                                      result
+                                                                      (princ-to-string result)))
+                                                            :used)
+                                                          (skip-tool () :skip))))
+                                                   (when (eq act :skip)
+                                                     (setf (agent-invocation-status inv) :error
+                                                           (agent-invocation-error-p inv) t
+                                                           (agent-invocation-result inv)
+                                                           (princ-to-string c)))
+                                                   (one-done))))))))))
 
 (defun %on-generate (run response callback error-callback)
   (handler-case
       (progn
-        (when (%canceled-p run)
-          (return-from %on-generate (%finish run :canceled callback)))
+        (when (%check-canceled run callback)
+          (return-from %on-generate))
         (setf (agent-run-last-response run) response
               (agent-run-turns run)
               (append (agent-run-turns run)
@@ -183,26 +251,59 @@
     (error (e)
       (funcall error-callback e))))
 
+(defun %do-generate (run callback error-callback)
+  (let ((choice (%tool-choice run)))
+    (%off-loop
+     (lambda ()
+       (generate (%backend run)
+                 (agent-run-turns run)
+                 :settings (agent-settings-llm (agent-run-settings run))
+                 :tools (collect-run-tools (agent-run-agent run)
+                                           :extra (agent-run-extra run))
+                 :tool-choice choice))
+     (lambda (response)
+       (%on-generate run response callback error-callback))
+     (lambda (c)
+       (let ((act (restart-case
+                      (progn
+                        (signal 'agent-generate-error
+                                :run run
+                                :step (agent-run-step run)
+                                :cause c
+                                :message (princ-to-string c))
+                        :fail)
+                    (retry () :retry)
+                    (use-value (response)
+                      (%on-generate run response callback error-callback)
+                      :used)
+                    (abort-run () :fail))))
+         (cond
+           ((eq act :retry)
+            (%do-generate run callback error-callback))
+           ((eq act :fail)
+            (funcall error-callback c))))))))
+
 (defun %tick-run (run callback error-callback)
-  (when (%canceled-p run)
-    (return-from %tick-run (%finish run :canceled callback)))
+  (when (%check-canceled run callback)
+    (return-from %tick-run))
   (let ((max (or (agent-settings-max-steps (agent-run-settings run)) 20)))
     (when (>= (agent-run-step run) max)
-      (return-from %tick-run (%finish run :max-steps callback)))
+      (let ((act (restart-case
+                     (progn
+                       (signal 'agent-max-steps
+                               :run run
+                               :message (format nil "max steps ~a" max))
+                       :finish)
+                   (continue-run (&optional (extra 1))
+                     (setf (agent-settings-max-steps (agent-run-settings run))
+                           (+ max (or extra 1)))
+                     :continue)
+                   (abort-run () :finish))))
+        (when (eq act :finish)
+          (return-from %tick-run (%finish run :max-steps callback)))))
     (incf (agent-run-step run))
     (%emit run :step (agent-run-step run))
-    (let ((choice (%tool-choice run)))
-      (%off-loop
-       (lambda ()
-         (generate (%backend run)
-                   (agent-run-turns run)
-                   :settings (agent-settings-llm (agent-run-settings run))
-                   :tools (collect-run-tools (agent-run-agent run)
-                                             :extra (agent-run-extra run))
-                   :tool-choice choice))
-       (lambda (response)
-         (%on-generate run response callback error-callback))
-       error-callback))))
+    (%do-generate run callback error-callback)))
 
 (defmethod run-ai-agent-async ((agent ai-agent) turns &key settings tools on-event
                                callback error-callback)

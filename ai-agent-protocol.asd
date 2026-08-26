@@ -66,6 +66,7 @@
   :serial t
   :components ((:file "package")
                (:file "protocol-test")
+               (:file "restarts-test")
                (:file "mcp-test")
                (:file "ag-ui-test")
                (:file "a2a-test"))
