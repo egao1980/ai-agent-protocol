@@ -66,11 +66,33 @@
       (let* ((agent (make-ai-agent :name "x" :backend backend))
              (run (handler-bind ((agent-generate-error
                                   (lambda (c)
-                                    (invoke-restart 'retry))))
+                                    (invoke-retry c))))
                     (run-ai-agent agent "hi"))))
         (ok (eq :stop (agent-run-finish-reason run)))
         (ok (equal "recovered" (agent-run-text run)))
         (ok (= 2 n))))))
+
+(deftest max-steps-continue
+  (with-agent-loop
+    (let* ((n 0)
+           (backend (make-mock-llm-backend
+                     :tool-calls (list (make-llm-tool-call-part
+                                        :id "c1" :name "loop" :arguments "{}"))))
+           (agent (make-ai-agent
+                   :name "loopy" :backend backend
+                   :settings (make-agent-settings :max-steps 1))))
+      (define-agent-tool agent "loop" () (args)
+        (declare (ignore args))
+        "again")
+      (let ((run (handler-bind ((agent-max-steps
+                                 (lambda (c)
+                                   (incf n)
+                                   (when (= n 1)
+                                     (continue c)))))
+                    (run-ai-agent agent "go"))))
+        (ok (eq :max-steps (agent-run-finish-reason run)))
+        (ok (= 2 n))
+        (ok (= 2 (agent-run-step run)))))))
 
 (deftest cancel-signals-agent-canceled
   (with-agent-loop
@@ -126,7 +148,7 @@
                                       "did-it")))
       (let ((run (handler-bind ((agent-approval-required
                                  (lambda (c)
-                                   (invoke-restart 'approve))))
+                                   (invoke-approve c))))
                    (run-ai-agent agent "go"))))
         (ok (eq :stop (agent-run-finish-reason run)))
         (ok (equal "did-it"
