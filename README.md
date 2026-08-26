@@ -37,6 +37,13 @@ CL tools: `function-tool` / `define-agent-tool`. Nested agent in `:tools` = one 
 
 MCP sampling (`create-message` → `generate`) is `ai-agent-protocol/mcp:make-mcp-sampling-handler` — **not** in `llm-protocol`.
 
+Live LM Studio cycle (instructions + user prompt + CL `add` tool):
+
+```bash
+set -a && source ../.env && set +a
+CL_SOURCE_REGISTRY="$PWD/../:" ros -l scripts/demo.lisp
+```
+
 Part of [cl-stack](https://github.com/egao1980/cl-stack).
 
 ## License

@@ -7,6 +7,21 @@
       llm-protocol:*llm-backend*
       (error 'agent-error :message "no llm-backend on agent or *llm-backend*")))
 
+(defun %plist-get (plist key)
+  (and (consp plist) (getf plist key)))
+
+(defun %tool-choice (run)
+  "TOOL-CHOICE for this GENERATE. EXTRA :tool-choice always; :first-tool-choice
+   only on step 1 (so a follow-up after a tool result is not forced)."
+  (let* ((settings (agent-run-settings run))
+         (extra (agent-settings-extra settings))
+         (llm (agent-settings-llm settings)))
+    (or (%plist-get extra :tool-choice)
+        (and (= 1 (agent-run-step run))
+             (%plist-get extra :first-tool-choice))
+        (and (llm-settings-p llm)
+             (%plist-get (llm-settings-extra llm) :tool-choice)))))
+
 (defun %canceled-p (run)
   (agent-run-handle-canceled-p (agent-run-handle run)))
 
@@ -176,16 +191,18 @@
       (return-from %tick-run (%finish run :max-steps callback)))
     (incf (agent-run-step run))
     (%emit run :step (agent-run-step run))
-    (%off-loop
-     (lambda ()
-       (generate (%backend run)
-                 (agent-run-turns run)
-                 :settings (agent-settings-llm (agent-run-settings run))
-                 :tools (collect-run-tools (agent-run-agent run)
-                                           :extra (agent-run-extra run))))
-     (lambda (response)
-       (%on-generate run response callback error-callback))
-     error-callback)))
+    (let ((choice (%tool-choice run)))
+      (%off-loop
+       (lambda ()
+         (generate (%backend run)
+                   (agent-run-turns run)
+                   :settings (agent-settings-llm (agent-run-settings run))
+                   :tools (collect-run-tools (agent-run-agent run)
+                                             :extra (agent-run-extra run))
+                   :tool-choice choice))
+       (lambda (response)
+         (%on-generate run response callback error-callback))
+       error-callback))))
 
 (defmethod run-ai-agent-async ((agent ai-agent) turns &key settings tools on-event
                                callback error-callback)
