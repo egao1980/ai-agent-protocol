@@ -96,23 +96,19 @@
 
 (deftest cancel-signals-agent-canceled
   (with-agent-loop
-    (let* ((agent (make-ai-agent :backend (make-mock-llm-backend)))
-           (seen nil)
-           (run nil)
-           (handle (handler-bind ((agent-canceled
-                                   (lambda (c)
-                                     (setf seen c)
-                                     nil)))
-                     (run-ai-agent-async
-                      agent "hi"
-                      :callback (lambda (r) (setf run r))
-                      :error-callback #'error))))
-      (cancel-agent-run handle)
-      (event-protocol:run event-protocol:*event-backend* event-protocol:*event-loop*
-                          :stop-when-idle t)
+    (let* ((seen nil)
+           (agent (make-ai-agent :backend (make-mock-llm-backend)))
+           (run (handler-bind ((agent-canceled
+                                (lambda (c)
+                                  (setf seen c)
+                                  nil)))
+                  (run-ai-agent
+                   agent "hi"
+                   :on-event (lambda (kind payload)
+                               (when (eq kind :started)
+                                 (cancel-agent-run (agent-run-handle payload))))))))
       (ok (typep seen 'agent-canceled))
-      (ok (or (null run)
-              (eq :canceled (agent-run-finish-reason run)))))))
+      (ok (eq :canceled (agent-run-finish-reason run))))))
 
 (deftest approval-default-still-pauses
   (with-agent-loop

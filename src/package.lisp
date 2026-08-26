@@ -4,6 +4,7 @@
   (:local-nicknames (#:bt #:bordeaux-threads)
                     (#:event #:event-protocol))
   (:export
+   #:agent-condition
    #:agent-error
    #:agent-error-message
    #:agent-error-run
