@@ -110,14 +110,6 @@
   (let ((r (find-restart 'pause-for-approval condition)))
     (when r (invoke-restart r))))
 
-(defun invoke-continue-run (&optional condition &rest args)
-  (let ((r (find-restart 'continue-run condition)))
-    (when r (apply #'invoke-restart r args))))
-
-(defun invoke-abort-run (&optional condition)
-  (let ((r (find-restart 'abort-run condition)))
-    (when r (invoke-restart r))))
-
 (defun auto-skip-tool (condition)
   "HANDLER-BIND: SKIP-TOOL on tool/unknown-tool errors."
   (when (find-restart 'skip-tool condition)

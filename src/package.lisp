@@ -30,8 +30,6 @@
    #:invoke-approve
    #:invoke-deny
    #:invoke-pause-for-approval
-   #:invoke-continue-run
-   #:invoke-abort-run
    #:auto-skip-tool
    #:auto-pause-approval
    #:auto-retry

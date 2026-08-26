@@ -23,7 +23,7 @@
            (agent (make-ai-agent :name "x" :backend backend))
            (run (handler-bind ((agent-unknown-tool
                                 (lambda (c)
-                                  (invoke-use-value "from-restart" c))))
+                                  (use-value "from-restart" c))))
                   (run-ai-agent agent "go"))))
       (ok (eq :stop (agent-run-finish-reason run)))
       (ok (eq :done (agent-invocation-status (first (agent-run-invocations run)))))
@@ -43,7 +43,7 @@
         (error "exploded"))
       (let ((run (handler-bind ((agent-tool-error
                                  (lambda (c)
-                                   (invoke-use-value "patched" c))))
+                                   (use-value "patched" c))))
                    (run-ai-agent agent "go"))))
         (ok (eq :stop (agent-run-finish-reason run)))
         (ok (eq :done (agent-invocation-status (first (agent-run-invocations run)))))
@@ -66,7 +66,7 @@
       (let* ((agent (make-ai-agent :name "x" :backend backend))
              (run (handler-bind ((agent-generate-error
                                   (lambda (c)
-                                    (invoke-retry c))))
+                                    (invoke-restart 'retry))))
                     (run-ai-agent agent "hi"))))
         (ok (eq :stop (agent-run-finish-reason run)))
         (ok (equal "recovered" (agent-run-text run)))
@@ -126,7 +126,7 @@
                                       "did-it")))
       (let ((run (handler-bind ((agent-approval-required
                                  (lambda (c)
-                                   (invoke-approve c))))
+                                   (invoke-restart 'approve))))
                    (run-ai-agent agent "go"))))
         (ok (eq :stop (agent-run-finish-reason run)))
         (ok (equal "did-it"

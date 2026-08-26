@@ -32,14 +32,18 @@
   run)
 
 (defun %check-canceled (run callback)
-  "T when the run finished as :canceled. CONTINUE-RUN skips the finish."
+  "T when the run finished as :canceled. CONTINUE skips the finish."
   (when (%canceled-p run)
     (let ((act (restart-case
                    (progn
                      (signal 'agent-canceled :run run :message "agent run canceled")
                      :finish)
-                 (continue-run () :continue)
-                 (abort-run () :finish))))
+                 (continue ()
+                   :report "Ignore cancel and continue the run"
+                   :continue)
+                 (abort ()
+                   :report "Finish the run as canceled"
+                   :finish))))
       (when (eq act :finish)
         (%finish run :canceled callback)
         t))))
@@ -102,11 +106,14 @@
                                 :message (format nil "unknown tool ~s" name))
                         :skip)
                     (use-value (result)
+                      :report "Use a supplied tool result string"
                       (setf (agent-invocation-status inv) :done
                             (agent-invocation-result inv)
                             (if (stringp result) result (princ-to-string result)))
                       :used)
-                    (skip-tool () :skip))))
+                    (skip-tool ()
+                      :report "Record the unknown tool as an error and continue"
+                      :skip))))
          (when (eq act :skip)
            (setf (agent-invocation-status inv) :error
                  (agent-invocation-error-p inv) t
@@ -124,12 +131,15 @@
     (restart-case
         (signal 'agent-approval-required :run run :invocation inv)
       (approve ()
+        :report "Approve the tool invocation"
         (setf (agent-invocation-status inv) :approved))
       (deny ()
+        :report "Deny the tool invocation"
         (setf (agent-invocation-status inv) :denied
               (agent-invocation-result inv) "denied"
               (agent-invocation-error-p inv) nil))
       (pause-for-approval ()
+        :report "Pause the run for HITL approval"
         nil))))
 
 (defun %after-invocations (run callback error-callback)
@@ -197,6 +207,7 @@
                                                                       :message (princ-to-string c))
                                                               :skip)
                                                           (use-value (result)
+                                                            :report "Use a supplied tool result string"
                                                             (setf (agent-invocation-status inv) :done
                                                                   (agent-invocation-error-p inv) nil
                                                                   (agent-invocation-result inv)
@@ -204,7 +215,9 @@
                                                                       result
                                                                       (princ-to-string result)))
                                                             :used)
-                                                          (skip-tool () :skip))))
+                                                          (skip-tool ()
+                                                            :report "Record the tool error and continue"
+                                                            :skip))))
                                                    (when (eq act :skip)
                                                      (setf (agent-invocation-status inv) :error
                                                            (agent-invocation-error-p inv) t
@@ -272,11 +285,16 @@
                                 :cause c
                                 :message (princ-to-string c))
                         :fail)
-                    (retry () :retry)
+                    (retry ()
+                      :report "Retry GENERATE"
+                      :retry)
                     (use-value (response)
+                      :report "Use a supplied LLM-RESPONSE"
                       (%on-generate run response callback error-callback)
                       :used)
-                    (abort-run () :fail))))
+                    (abort ()
+                      :report "Fail the generate step"
+                      :fail))))
          (cond
            ((eq act :retry)
             (%do-generate run callback error-callback))
@@ -294,11 +312,14 @@
                                :run run
                                :message (format nil "max steps ~a" max))
                        :finish)
-                   (continue-run (&optional (extra 1))
+                   (continue (&optional (extra 1))
+                     :report "Allow more steps and continue"
                      (setf (agent-settings-max-steps (agent-run-settings run))
                            (+ max (or extra 1)))
                      :continue)
-                   (abort-run () :finish))))
+                   (abort ()
+                     :report "Stop the run"
+                     :finish))))
         (when (eq act :finish)
           (return-from %tick-run (%finish run :max-steps callback)))))
     (incf (agent-run-step run))
