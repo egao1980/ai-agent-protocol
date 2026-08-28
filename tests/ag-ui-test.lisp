@@ -104,13 +104,19 @@
 (deftest ag-ui-cancel-is-run-error
   (with-agent-loop
     (let* ((events '())
+           (eb event-protocol:*event-backend*)
+           (el event-protocol:*event-loop*)
            (agent (make-ai-agent :backend (make-mock-llm-backend)))
            (handle (ai-agent-protocol/ag-ui:start-ag-ui-agent-run
                     agent (%ag-ui-input "hi")
-                    :on-event (lambda (ev) (push ev events)))))
+                    :on-event (lambda (ev) (push ev events))
+                    :callback (lambda (run)
+                                (declare (ignore run))
+                                (event-protocol:stop eb el))
+                    :error-callback #'error)))
       (cancel-agent-run handle)
-      (event-protocol:run event-protocol:*event-backend* event-protocol:*event-loop*
-                          :stop-when-idle t)
+      ;; stop-when-idle t returns before the unref'd async drains %tick-run.
+      (event-protocol:run eb el :stop-when-idle nil)
       (ok (find "RUN_ERROR" (%event-types (reverse events)) :test #'equal)))))
 
 (deftest ag-ui-unknown-part-no-crash
