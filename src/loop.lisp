@@ -66,7 +66,8 @@
     (%emit run :invocation inv)))
 
 (defun %merge-part-into-turn (turn part)
-  "Append PART. Same-id tool-call parts concatenate ARGUMENTS (delta suffix)."
+  "Append PART. Same-id tool-call parts concatenate ARGUMENTS (delta suffix).
+   Copy tool-call parts so we do not mutate the backend's response objects."
   (cond
     ((llm-tool-call-part-p part)
      (let* ((id (llm-tool-call-part-id part))
@@ -80,7 +81,11 @@
                               (or (llm-tool-call-part-arguments existing) "")
                               (or (llm-tool-call-part-arguments part) "")))
            (setf (llm-turn-parts turn)
-                 (append (llm-turn-parts turn) (list part))))))
+                 (append (llm-turn-parts turn)
+                         (list (make-llm-tool-call-part
+                                :id id
+                                :name (llm-tool-call-part-name part)
+                                :arguments (or (llm-tool-call-part-arguments part) ""))))))))
     (t
      (setf (llm-turn-parts turn)
            (append (llm-turn-parts turn) (list part))))))
@@ -344,32 +349,34 @@
 
 (defun %do-generate (run callback error-callback)
   (let ((choice (%tool-choice run)))
-    (%off-loop
-     (lambda ()
-       (flet ((emit-part (part)
-                (let ((p part))
-                  (%call-on-loop
-                   (lambda ()
-                     (%append-in-flight-part run p)
-                     (%emit run :part p))))))
-         (handler-case
-             (stream-generate (%backend run)
-                              (agent-run-turns run)
-                              :settings (agent-settings-llm (agent-run-settings run))
-                              :tools (collect-run-tools (agent-run-agent run)
-                                                        :extra (agent-run-extra run))
-                              :tool-choice choice
-                              :on-part #'emit-part)
-           (llm-unsupported ()
-             (let ((response (generate (%backend run)
-                                       (agent-run-turns run)
-                                       :settings (agent-settings-llm (agent-run-settings run))
-                                       :tools (collect-run-tools (agent-run-agent run)
-                                                                 :extra (agent-run-extra run))
-                                       :tool-choice choice)))
-               (dolist (part (llm-response-parts response))
-                 (emit-part part))
-               response)))))
+    (multiple-value-bind (eb el) (%event-context)
+      (%off-loop
+       (lambda ()
+         (flet ((emit-part (part)
+                  (let ((p part))
+                    ;; Capture EB/EL — worker has no *event-loop* binding.
+                    (event:wake-call eb el
+                                     (lambda ()
+                                       (%append-in-flight-part run p)
+                                       (%emit run :part p))))))
+           (handler-case
+               (stream-generate (%backend run)
+                                (agent-run-turns run)
+                                :settings (agent-settings-llm (agent-run-settings run))
+                                :tools (collect-run-tools (agent-run-agent run)
+                                                          :extra (agent-run-extra run))
+                                :tool-choice choice
+                                :on-part #'emit-part)
+             (llm-unsupported ()
+               (let ((response (generate (%backend run)
+                                         (agent-run-turns run)
+                                         :settings (agent-settings-llm (agent-run-settings run))
+                                         :tools (collect-run-tools (agent-run-agent run)
+                                                                   :extra (agent-run-extra run))
+                                         :tool-choice choice)))
+                 (dolist (part (llm-response-parts response))
+                   (emit-part part))
+                 response)))))
      (lambda (response)
        (%on-generate run response callback error-callback))
      (lambda (c)
@@ -395,7 +402,7 @@
            ((eq act :retry)
             (%do-generate run callback error-callback))
            ((eq act :fail)
-            (funcall error-callback c))))))))
+            (funcall error-callback c)))))))))
 
 (defun %tick-run (run callback error-callback)
   (when (%check-canceled run callback)
