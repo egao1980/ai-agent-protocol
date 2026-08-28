@@ -1,5 +1,5 @@
 (defsystem "ai-agent-protocol"
-  :version "0.1.0"
+  :version "0.1.1"
   :description "Async-first CLOS agent protocol over llm-protocol (CL tools, invocations, approvals)"
   :author "egao1980"
   :license "MIT"
