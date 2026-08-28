@@ -17,12 +17,25 @@
     (event:wake-call eb el fn)
     nil))
 
+(defvar *off-loop-specials* nil
+  "Symbols captured on the owner thread and rebound around SUBMIT thunks.
+   Push `http-protocol:*http-backend*` when generate uses HTTP.")
+
+(defun %capture-off-loop-bindings ()
+  (loop for s in *off-loop-specials*
+        when (and (symbolp s) (boundp s))
+        collect (cons s (symbol-value s))))
+
 (defun %off-loop (thunk callback error-callback)
   "Run THUNK on a worker; deliver the value/error on the event loop."
   (multiple-value-bind (eb el) (%event-context)
-    (event:submit eb el thunk
-                  :callback callback
-                  :error-callback error-callback)
+    (let ((bindings (%capture-off-loop-bindings)))
+      (event:submit eb el
+                    (lambda ()
+                      (progv (mapcar #'car bindings) (mapcar #'cdr bindings)
+                        (funcall thunk)))
+                    :callback callback
+                    :error-callback error-callback))
     nil))
 
 (defun %await (start-fn &key timeout)

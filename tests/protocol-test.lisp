@@ -244,3 +244,22 @@
                                 (when (eq k :invocation)
                                   (push (agent-invocation-status p) statuses))))
       (ok (equal '(:approved :running :done) (reverse statuses))))))
+
+(defvar *off-loop-probe* :unset)
+
+(deftest off-loop-rebinds-specials
+  (with-agent-loop
+    (let* ((*off-loop-probe* :from-owner)
+           (*off-loop-specials* (cons '*off-loop-probe* *off-loop-specials*))
+           (seen :unset)
+           (backend (make-mock-llm-backend
+                     :handler (lambda (b turns &key &allow-other-keys)
+                                (declare (ignore b turns))
+                                (setf seen *off-loop-probe*)
+                                (make-llm-response
+                                 :parts (list (make-llm-text-part :text "ok"))
+                                 :finish-reason :stop))))
+           (agent (make-ai-agent :name "spec" :backend backend))
+           (run (run-ai-agent agent "hi")))
+      (ok (eq :stop (agent-run-finish-reason run)))
+      (ok (eq :from-owner seen)))))

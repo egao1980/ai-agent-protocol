@@ -117,6 +117,8 @@
    #:resume-ai-agent
    #:approve-invocation
    #:deny-invocation
-   #:complete-invocation))
+   #:complete-invocation
+
+   #:*off-loop-specials*))
 
 (in-package #:ai-agent-protocol)
