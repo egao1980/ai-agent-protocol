@@ -93,6 +93,9 @@
    #:agent-run-last-response
    #:agent-run-text
    #:agent-run-handle
+   #:agent-run-on-event
+   #:agent-run-on-part
+   #:agent-run-in-flight-turn
 
    #:agent-run-handle
    #:agent-run-handle-p

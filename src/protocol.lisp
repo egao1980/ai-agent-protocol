@@ -144,40 +144,43 @@ Sync handlers run off the event loop. An AI-AGENT source runs as a subagent.")
     (cancel-agent-run (agent-run-handle run))))
 
 (defgeneric run-ai-agent-async (agent turns &key settings tools on-event
-                                callback error-callback)
+                                on-part callback error-callback)
   (:documentation "Async primitive. CALLBACK gets an AGENT-RUN.
 TOOLS are extra sources for this run (appended). ON-EVENT is (kind payload).
+ON-PART is (lambda (llm-part)) in addition to :part on-event.
 Returns AGENT-RUN-HANDLE."))
 
-(defgeneric run-ai-agent (agent turns &key settings tools on-event)
+(defgeneric run-ai-agent (agent turns &key settings tools on-event on-part)
   (:documentation "Await RUN-AI-AGENT-ASYNC (drives the bound event loop).")
-  (:method ((agent ai-agent) turns &key settings tools on-event)
+  (:method ((agent ai-agent) turns &key settings tools on-event on-part)
     (let ((timeout (agent-settings-timeout
                     (or (and settings (coerce-agent-settings settings))
                         (ai-agent-settings agent)))))
       (%await (lambda (ok err)
                 (run-ai-agent-async agent turns
                                     :settings settings :tools tools
-                                    :on-event on-event
+                                    :on-event on-event :on-part on-part
                                     :callback ok :error-callback err))
               :timeout timeout))))
 
-(defgeneric resume-ai-agent-async (run &key callback error-callback on-event)
+(defgeneric resume-ai-agent-async (run &key callback error-callback on-event
+                                  on-part)
   (:documentation "Continue a paused AGENT-RUN (after approve/deny/complete)."))
 
-(defgeneric resume-ai-agent (run &key on-event)
+(defgeneric resume-ai-agent (run &key on-event on-part)
   (:documentation "Await RESUME-AI-AGENT-ASYNC.")
-  (:method ((run agent-run) &key on-event)
+  (:method ((run agent-run) &key on-event on-part)
     (let ((timeout (agent-settings-timeout (agent-run-settings run))))
       (%await (lambda (ok err)
                 (resume-ai-agent-async run :callback ok :error-callback err
-                                       :on-event on-event))
+                                       :on-event on-event :on-part on-part))
               :timeout timeout))))
 
 (defun approve-invocation (run invocation &key)
   (setf (agent-invocation-status invocation) :approved)
   (setf (agent-run-pending run)
         (remove invocation (agent-run-pending run)))
+  (%emit run :invocation invocation)
   run)
 
 (defun deny-invocation (run invocation &key reason)
@@ -186,6 +189,7 @@ Returns AGENT-RUN-HANDLE."))
         (agent-invocation-error-p invocation) nil)
   (setf (agent-run-pending run)
         (remove invocation (agent-run-pending run)))
+  (%emit run :invocation invocation)
   run)
 
 (defun complete-invocation (run invocation result &key error-p)
@@ -196,6 +200,7 @@ Returns AGENT-RUN-HANDLE."))
         (agent-invocation-error-p invocation) error-p)
   (setf (agent-run-pending run)
         (remove invocation (agent-run-pending run)))
+  (%emit run :invocation invocation)
   run)
 
 (defun %parse-defagent-body (body)

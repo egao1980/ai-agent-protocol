@@ -52,6 +52,7 @@
       result)))
 
 (defun %emit (run kind payload)
-  (let ((fn (agent-run-on-event run)))
-    (when fn
-      (funcall fn kind payload))))
+  (when (and (eq kind :part) (agent-run-on-part run))
+    (funcall (agent-run-on-part run) payload))
+  (when (agent-run-on-event run)
+    (funcall (agent-run-on-event run) kind payload)))
