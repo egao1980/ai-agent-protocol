@@ -136,6 +136,34 @@
       (ok (find "TEXT_MESSAGE_CONTENT" types :test #'equal))
       (ok (equal "RUN_FINISHED" (car (last types)))))))
 
+(deftest ag-ui-passes-message-history
+  (with-agent-loop
+    (let* ((seen nil)
+           (backend (make-mock-llm-backend
+                     :handler (lambda (b turns &key &allow-other-keys)
+                                (declare (ignore b))
+                                (setf seen (copy-list turns))
+                                (make-llm-response
+                                 :parts (list (make-llm-text-part :text "ok"))
+                                 :finish-reason :stop))))
+           (input (ag-ui-protocol:make-run-agent-input
+                   :thread-id "t" :run-id "r"
+                   :messages (list
+                              (ag-ui-protocol:make-ag-ui-message
+                               :id "1" :role "user" :content "first")
+                              (ag-ui-protocol:make-ag-ui-message
+                               :id "2" :role "assistant" :content "ack")
+                              (ag-ui-protocol:make-ag-ui-message
+                               :id "3" :role "user" :content "second"))))
+           (fn (ai-agent-protocol/ag-ui:make-ai-agent-ag-ui-handler
+                (make-ai-agent :backend backend))))
+      (funcall fn input)
+      (ok (equal '(:user :assistant :user)
+                 (mapcar #'llm-turn-role seen)))
+      (ok (equal "first" (turn-text (first seen))))
+      (ok (equal "ack" (turn-text (second seen))))
+      (ok (equal "second" (turn-text (third seen)))))))
+
 (deftest ag-ui-echo-handler-unchanged
   (let* ((agent (ag-ui-protocol:make-ag-ui-agent))
          (seen '())

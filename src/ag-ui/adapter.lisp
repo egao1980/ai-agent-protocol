@@ -172,19 +172,40 @@
 
 (defun %input-ids (input)
   (values (or (ag-ui-protocol:run-agent-input-thread-id input) "thread")
-          (or (ag-ui-protocol:run-agent-input-run-id input) "run")
-          (ag-ui-protocol:last-user-text input)))
+          (or (ag-ui-protocol:run-agent-input-run-id input) "run")))
+
+(defun ag-ui-message->turn (msg)
+  "One AG-UI message → LLM-TURN (user/assistant/system/tool + toolCalls)."
+  (let ((h (make-hash-table :test 'equal)))
+    (setf (gethash "role" h) (or (ag-ui-protocol:ag-ui-message-role msg) "user"))
+    (let ((c (ag-ui-protocol:ag-ui-message-content msg)))
+      (when c (setf (gethash "content" h) c)))
+    (let ((name (ag-ui-protocol:ag-ui-message-name msg)))
+      (when name (setf (gethash "name" h) name)))
+    (let ((tid (ag-ui-protocol:ag-ui-message-tool-call-id msg)))
+      (when tid (setf (gethash "tool_call_id" h) tid)))
+    (let ((tcs (ag-ui-protocol:ag-ui-message-tool-calls msg)))
+      (when tcs (setf (gethash "toolCalls" h) tcs)))
+    (llm-protocol:coerce-turn h)))
+
+(defun ag-ui-input-turns (input)
+  "Full `run-agent-input` messages as LLM turns. Empty → last-user-text fallback."
+  (let ((msgs (ag-ui-protocol:run-agent-input-messages input)))
+    (if (and msgs (plusp (length msgs)))
+        (map 'list #'ag-ui-message->turn msgs)
+        (list (llm-protocol:user-turn (ag-ui-protocol:last-user-text input))))))
 
 (defun start-ag-ui-agent-run (ai-agent input &key settings on-event
                               callback error-callback)
   "Run AI-AGENT asynchronously, encoding AG-UI events onto ON-EVENT.
+   Passes the full input.messages thread (not only last user text).
    Returns an AGENT-RUN-HANDLE (cancel token)."
-  (multiple-value-bind (thread run-id text)
+  (multiple-value-bind (thread run-id)
       (%input-ids input)
     (let ((encoder (make-ag-ui-encoder :thread-id thread :run-id run-id
                                        :on-event on-event)))
       (run-ai-agent-async
-       ai-agent text
+       ai-agent (ag-ui-input-turns input)
        :settings settings
        :on-event (lambda (kind payload)
                    (encode-agent-event encoder kind payload))
@@ -196,11 +217,11 @@
 (defun make-ai-agent-ag-ui-handler (agent &key settings)
   "Sync AG-UI handler. Emits via AG-UI-EMIT as events are encoded while awaiting."
   (lambda (input)
-    (multiple-value-bind (thread run-id text)
+    (multiple-value-bind (thread run-id)
         (%input-ids input)
       (let ((encoder (make-ag-ui-encoder :thread-id thread :run-id run-id)))
         (handler-case
-            (run-ai-agent agent text
+            (run-ai-agent agent (ag-ui-input-turns input)
                           :settings settings
                           :on-event (lambda (kind payload)
                                       (encode-agent-event encoder kind payload)))
