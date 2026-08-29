@@ -41,6 +41,53 @@
       (ok saw-started)
       (ok started-before-generate))))
 
+(deftest ag-ui-emits-reasoning
+  ;; llm-protocol has carried thinking parts all along; the encoder used to drop
+  ;; them, so reasoning never reached the UI.
+  (with-agent-loop
+    (let* ((backend (make-mock-llm-backend
+                     :handler (lambda (b turns &key &allow-other-keys)
+                                (declare (ignore b turns))
+                                (make-llm-response
+                                 :parts (list (make-llm-thinking-part
+                                               :text "weighing options")
+                                              (make-llm-text-part :text "done"))
+                                 :finish-reason :stop))))
+           (handler (ai-agent-protocol/ag-ui:make-ai-agent-ag-ui-handler
+                     (make-ai-agent :backend backend)))
+           (events (funcall handler (%ag-ui-input "hi")))
+           (types (%event-types events)))
+      (ok (find "REASONING_START" types :test #'equal))
+      (ok (find "REASONING_MESSAGE_START" types :test #'equal))
+      (ok (find "REASONING_MESSAGE_CONTENT" types :test #'equal))
+      (ok (find "REASONING_MESSAGE_END" types :test #'equal))
+      (ok (find "REASONING_END" types :test #'equal))
+      (let ((content (find "REASONING_MESSAGE_CONTENT" events
+                           :key #'ag-ui-protocol:ag-ui-event-type :test #'equal)))
+        (ok (equal "weighing options"
+                   (ag-ui-protocol:text-message-delta content))))
+      ;; Reasoning closes before the answer it produced opens.
+      (ok (< (position "REASONING_END" types :test #'equal)
+             (position "TEXT_MESSAGE_START" types :test #'equal))))))
+
+(deftest ag-ui-thinking-signature-becomes-encrypted-value
+  (with-agent-loop
+    (let* ((backend (make-mock-llm-backend
+                     :handler (lambda (b turns &key &allow-other-keys)
+                                (declare (ignore b turns))
+                                (make-llm-response
+                                 :parts (list (make-llm-thinking-part
+                                               :text "hm" :signature "opaque-blob"))
+                                 :finish-reason :stop))))
+           (handler (ai-agent-protocol/ag-ui:make-ai-agent-ag-ui-handler
+                     (make-ai-agent :backend backend)))
+           (events (funcall handler (%ag-ui-input "hi")))
+           (enc (find "REASONING_ENCRYPTED_VALUE" events
+                      :key #'ag-ui-protocol:ag-ui-event-type :test #'equal)))
+      (ok enc)
+      (ok (equal "message" (ag-ui-protocol:reasoning-encrypted-subtype enc)))
+      (ok (equal "opaque-blob" (ag-ui-protocol:reasoning-encrypted-value enc))))))
+
 (deftest ag-ui-text-deltas
   (with-agent-loop
     (let* ((backend (make-mock-llm-backend

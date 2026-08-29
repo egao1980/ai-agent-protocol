@@ -7,6 +7,7 @@
   ((thread-id :initarg :thread-id :accessor encoder-thread-id)
    (run-id :initarg :run-id :accessor encoder-run-id)
    (open-text-id :initform nil :accessor encoder-open-text-id)
+   (open-reasoning-id :initform nil :accessor encoder-open-reasoning-id)
    (open-tool-ids :initform (make-hash-table :test #'equal)
                   :accessor encoder-open-tool-ids)
    (current-step :initform nil :accessor encoder-current-step)
@@ -40,6 +41,14 @@
       (%push encoder (ag-ui-protocol:make-text-message-end-event :message-id id))
       (setf (encoder-open-text-id encoder) nil))))
 
+(defun %close-reasoning (encoder)
+  (let ((id (encoder-open-reasoning-id encoder)))
+    (when id
+      (%push encoder (ag-ui-protocol:make-reasoning-message-end-event
+                      :message-id id))
+      (%push encoder (ag-ui-protocol:make-reasoning-end-event :message-id id))
+      (setf (encoder-open-reasoning-id encoder) nil))))
+
 (defun %end-tool (encoder id)
   (when (gethash id (encoder-open-tool-ids encoder))
     (%push encoder (ag-ui-protocol:make-tool-call-end-event :tool-call-id id))
@@ -66,6 +75,8 @@
   (%push encoder (ag-ui-protocol:make-step-started-event :step-name name)))
 
 (defun %ensure-text (encoder)
+  ;; Reasoning precedes the answer it produced, so opening text closes it.
+  (%close-reasoning encoder)
   (or (encoder-open-text-id encoder)
       (let ((id (%new-text-id encoder)))
         (setf (encoder-open-text-id encoder) id)
@@ -73,10 +84,22 @@
                         :message-id id :role "assistant"))
         id)))
 
+(defun %ensure-reasoning (encoder)
+  (or (encoder-open-reasoning-id encoder)
+      (let ((id (format nil "reasoning-~a-~a" (encoder-run-id encoder)
+                        (length (encoder-events encoder)))))
+        (%close-text encoder)
+        (setf (encoder-open-reasoning-id encoder) id)
+        (%push encoder (ag-ui-protocol:make-reasoning-start-event :message-id id))
+        (%push encoder (ag-ui-protocol:make-reasoning-message-start-event
+                        :message-id id))
+        id)))
+
 (defun %tool-started-p (encoder id)
   (nth-value 1 (gethash id (encoder-open-tool-ids encoder))))
 
 (defun %start-tool (encoder id name)
+  (%close-reasoning encoder)
   (unless (%tool-started-p encoder id)
     (setf (gethash id (encoder-open-tool-ids encoder)) t)
     (%push encoder (ag-ui-protocol:make-tool-call-start-event
@@ -97,17 +120,33 @@
     (%push encoder (ag-ui-protocol:make-tool-call-args-event
                     :tool-call-id id :delta args))))
 
+(defun %encode-thinking-part (encoder part)
+  (let ((id (%ensure-reasoning encoder))
+        (text (or (llm-protocol:llm-thinking-part-text part) ""))
+        (signature (llm-protocol:llm-thinking-part-signature part)))
+    (when (plusp (length text))
+      (%push encoder (ag-ui-protocol:make-reasoning-message-content-event
+                      :message-id id :delta text)))
+    ;; A provider signature is opaque chain-of-thought the client stores and
+    ;; echoes back untouched — the encrypted-reasoning carry-over the spec
+    ;; describes for zero-data-retention providers.
+    (when signature
+      (%push encoder (ag-ui-protocol:make-reasoning-encrypted-value-event
+                      :subtype "message" :entity-id id
+                      :encrypted-value signature)))))
+
 (defun %encode-part (encoder part)
   (cond
     ((llm-protocol:llm-text-part-p part)
      (%encode-text-part encoder part))
     ((llm-protocol:llm-thinking-part-p part)
-     nil)
+     (%encode-thinking-part encoder part))
     ((llm-protocol:llm-tool-call-part-p part)
      (%encode-tool-part encoder part))
     (t nil)))
 
 (defun %encode-response (encoder)
+  (%close-reasoning encoder)
   (%close-text encoder)
   (%end-open-tools encoder))
 
@@ -125,6 +164,7 @@
       (t nil))))
 
 (defun %encode-finished (encoder run)
+  (%close-reasoning encoder)
   (%close-text encoder)
   (%end-open-tools encoder)
   (%finish-step encoder)
@@ -137,6 +177,7 @@
                       :run-id (encoder-run-id encoder)))))
 
 (defun %encode-error (encoder payload)
+  (%close-reasoning encoder)
   (%close-text encoder)
   (%end-open-tools encoder)
   (%finish-step encoder)
