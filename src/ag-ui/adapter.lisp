@@ -174,17 +174,22 @@
   (values (or (ag-ui-protocol:run-agent-input-thread-id input) "thread")
           (or (ag-ui-protocol:run-agent-input-run-id input) "run")))
 
+(defun %slot (fn object)
+  (handler-case (funcall fn object)
+    (unbound-slot () nil)))
+
 (defun ag-ui-message->turn (msg)
   "One AG-UI message → LLM-TURN (user/assistant/system/tool + toolCalls)."
   (let ((h (make-hash-table :test 'equal)))
-    (setf (gethash "role" h) (or (ag-ui-protocol:ag-ui-message-role msg) "user"))
-    (let ((c (ag-ui-protocol:ag-ui-message-content msg)))
+    (setf (gethash "role" h)
+          (or (%slot #'ag-ui-protocol:ag-ui-message-role msg) "user"))
+    (let ((c (%slot #'ag-ui-protocol:ag-ui-message-content msg)))
       (when c (setf (gethash "content" h) c)))
-    (let ((name (ag-ui-protocol:ag-ui-message-name msg)))
+    (let ((name (%slot #'ag-ui-protocol:ag-ui-message-name msg)))
       (when name (setf (gethash "name" h) name)))
-    (let ((tid (ag-ui-protocol:ag-ui-message-tool-call-id msg)))
+    (let ((tid (%slot #'ag-ui-protocol:ag-ui-message-tool-call-id msg)))
       (when tid (setf (gethash "tool_call_id" h) tid)))
-    (let ((tcs (ag-ui-protocol:ag-ui-message-tool-calls msg)))
+    (let ((tcs (%slot #'ag-ui-protocol:ag-ui-message-tool-calls msg)))
       (when tcs (setf (gethash "toolCalls" h) tcs)))
     (llm-protocol:coerce-turn h)))
 
