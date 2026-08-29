@@ -88,6 +88,131 @@
       (ok (equal "message" (ag-ui-protocol:reasoning-encrypted-subtype enc)))
       (ok (equal "opaque-blob" (ag-ui-protocol:reasoning-encrypted-value enc))))))
 
+(defun %gated-agent ()
+  "An agent whose only tool needs approval, so a run pauses on first use."
+  (let* ((backend (make-mock-llm-backend
+                   :handler (%one-shot-tools
+                             (list (make-llm-tool-call-part
+                                    :id "c1" :name "danger"
+                                    :arguments "{\"to\":\"a@b.com\"}"))
+                             "sent")))
+         (agent (make-ai-agent :name "gated" :backend backend)))
+    (register-agent-tool
+     agent
+     (make-function-tool :name "danger" :approval-required-p t
+                         :handler (lambda (args)
+                                    (format nil "did-it ~a" (or args "")))))
+    agent))
+
+(deftest ag-ui-pause-emits-interrupt-outcome
+  ;; The whole point of wave 3: a run that pauses for approval used to finish
+  ;; as if nothing were pending, leaving the UI nothing to ask about.
+  (with-agent-loop
+    (let* ((agent (%gated-agent))
+           (events '())
+           (run (run-ai-agent
+                 agent (ag-ui-protocol:last-user-text (%ag-ui-input "go"))))
+           (encoder (ai-agent-protocol/ag-ui:make-ag-ui-encoder
+                     :thread-id "t1" :run-id "r1"
+                     :on-event (lambda (ev) (push ev events)))))
+      (ok (eq :approval (agent-run-finish-reason run)))
+      (ai-agent-protocol/ag-ui:encode-agent-event encoder :finished run)
+      (let* ((finished (first (nreverse events)))
+             (open (ag-ui-protocol:open-interrupts finished)))
+        (ok (equal "RUN_FINISHED" (ag-ui-protocol:ag-ui-event-type finished)))
+        (ok (ag-ui-protocol:run-interrupted-p finished))
+        (ok (= 1 (length open)))
+        (ok (equal "tool_call" (ag-ui-protocol:interrupt-reason (first open))))
+        (ok (equal "c1" (ag-ui-protocol:interrupt-tool-call-id (first open))))
+        ;; The schema advertising editedArgs is how a client learns it may
+        ;; offer approve-with-edits.
+        (ok (gethash "editedArgs"
+                     (gethash "properties"
+                              (ag-ui-protocol:interrupt-response-schema
+                               (first open)))))))))
+
+(deftest ag-ui-resume-approves-and-continues
+  (with-agent-loop
+    (let* ((agent (%gated-agent))
+           (run (run-ai-agent agent "go"))
+           (interrupts (ai-agent-protocol/ag-ui:run-interrupts run))
+           (input (ag-ui-protocol:make-run-agent-input
+                   :thread-id "t1" :run-id "r2"
+                   :resume (list (ag-ui-protocol:make-resume-entry
+                                  :interrupt-id (ag-ui-protocol:interrupt-id
+                                                 (first interrupts))
+                                  :payload (ag-ui-protocol:json-object
+                                            "approved" t)))))
+           (events (ai-agent-protocol/ag-ui:resume-ag-ui-agent-run run input))
+           (types (%event-types events)))
+      (ok (eq :stop (agent-run-finish-reason run)))
+      ;; The resumed run reports the result against the original call id
+      ;; without re-proposing it.
+      (ok (find "TOOL_CALL_RESULT" types :test #'equal))
+      (ng (find "TOOL_CALL_START" types :test #'equal))
+      (ok (equal "RUN_FINISHED" (car (last types))))
+      (let ((result (find "TOOL_CALL_RESULT" events
+                          :key #'ag-ui-protocol:ag-ui-event-type :test #'equal)))
+        (ok (equal "c1" (ag-ui-protocol:tool-call-id result)))))))
+
+(deftest ag-ui-resume-denies
+  (with-agent-loop
+    (let* ((agent (%gated-agent))
+           (run (run-ai-agent agent "go"))
+           (interrupts (ai-agent-protocol/ag-ui:run-interrupts run))
+           (input (ag-ui-protocol:make-run-agent-input
+                   :thread-id "t1" :run-id "r2"
+                   :resume (list (ag-ui-protocol:make-resume-entry
+                                  :interrupt-id (ag-ui-protocol:interrupt-id
+                                                 (first interrupts))
+                                  :payload (ag-ui-protocol:json-object
+                                            "approved" nil))))))
+      (ai-agent-protocol/ag-ui:resume-ag-ui-agent-run run input)
+      (ok (eq :denied (agent-invocation-status
+                       (first (agent-run-invocations run))))))))
+
+(deftest ag-ui-resume-applies-edited-args
+  (with-agent-loop
+    (let* ((agent (%gated-agent))
+           (run (run-ai-agent agent "go"))
+           (interrupts (ai-agent-protocol/ag-ui:run-interrupts run))
+           (input (ag-ui-protocol:make-run-agent-input
+                   :thread-id "t1" :run-id "r2"
+                   :resume (list (ag-ui-protocol:make-resume-entry
+                                  :interrupt-id (ag-ui-protocol:interrupt-id
+                                                 (first interrupts))
+                                  :payload (ag-ui-protocol:json-object
+                                            "approved" t
+                                            "editedArgs"
+                                            (ag-ui-protocol:json-object
+                                             "to" "edited@x.com")))))))
+      (ai-agent-protocol/ag-ui:resume-ag-ui-agent-run run input)
+      ;; editedArgs is a full replacement, not a merge.
+      (ok (search "edited@x.com"
+                  (agent-invocation-result
+                   (first (agent-run-invocations run))))))))
+
+(deftest ag-ui-resume-rejects-a-non-conforming-answer
+  (with-agent-loop
+    (let* ((agent (%gated-agent))
+           (run (run-ai-agent agent "go")))
+      ;; Input on a thread with an interrupt open must address it.
+      (ok (signals (ai-agent-protocol/ag-ui:apply-resume
+                    run (ag-ui-protocol:make-run-agent-input
+                         :thread-id "t1" :run-id "r2"))
+                   'ag-ui-protocol:ag-ui-resume-error))
+      ;; ...and must name an interrupt that is actually open.
+      (ok (signals (ai-agent-protocol/ag-ui:apply-resume
+                    run (ag-ui-protocol:make-run-agent-input
+                         :thread-id "t1" :run-id "r2"
+                         :resume (list (ag-ui-protocol:make-resume-entry
+                                        :interrupt-id "int-nope"
+                                        :payload (ag-ui-protocol:json-object
+                                                  "approved" t)))))
+                   'ag-ui-protocol:ag-ui-resume-error))
+      ;; Still pending: a rejected resume must not half-apply.
+      (ok (= 1 (length (agent-run-pending run)))))))
+
 (deftest ag-ui-text-deltas
   (with-agent-loop
     (let* ((backend (make-mock-llm-backend

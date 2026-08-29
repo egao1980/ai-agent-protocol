@@ -7,6 +7,12 @@
            #:start-ag-ui-agent-run
            #:make-ai-agent-ag-ui-handler
            #:ag-ui-message->turn
-           #:ag-ui-input-turns))
+           #:ag-ui-input-turns
+           ;; interrupts / human-in-the-loop
+           #:invocation-interrupt
+           #:run-interrupts
+           #:mark-tool-resumed
+           #:apply-resume
+           #:resume-ag-ui-agent-run))
 
 (in-package #:ai-agent-protocol/ag-ui)

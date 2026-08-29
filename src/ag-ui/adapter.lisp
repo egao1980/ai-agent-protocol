@@ -10,6 +10,11 @@
    (open-reasoning-id :initform nil :accessor encoder-open-reasoning-id)
    (open-tool-ids :initform (make-hash-table :test #'equal)
                   :accessor encoder-open-tool-ids)
+   ;; Tool calls announced by an earlier run and now being resumed. The spec
+   ;; says a resumed run reports the result against the original toolCallId
+   ;; without re-emitting Start/Args/End, so these are suppressed.
+   (resumed-tool-ids :initform (make-hash-table :test #'equal)
+                     :accessor encoder-resumed-tool-ids)
    (current-step :initform nil :accessor encoder-current-step)
    (on-event :initarg :on-event :initform nil :accessor encoder-on-event)
    (events :initform nil :accessor encoder-events)))
@@ -98,8 +103,14 @@
 (defun %tool-started-p (encoder id)
   (nth-value 1 (gethash id (encoder-open-tool-ids encoder))))
 
+(defun mark-tool-resumed (encoder id)
+  "Suppress the tool-call triad for ID; only its result belongs in this run."
+  (setf (gethash id (encoder-resumed-tool-ids encoder)) t))
+
 (defun %start-tool (encoder id name)
   (%close-reasoning encoder)
+  (when (gethash id (encoder-resumed-tool-ids encoder))
+    (return-from %start-tool nil))
   (unless (%tool-started-p encoder id)
     (setf (gethash id (encoder-open-tool-ids encoder)) t)
     (%push encoder (ag-ui-protocol:make-tool-call-start-event
@@ -154,6 +165,15 @@
   (let ((id (or (agent-invocation-id inv) "call"))
         (status (agent-invocation-status inv)))
     (case status
+      ;; A proposed invocation is the agent asking permission. It still gets the
+      ;; tool-call triad so the UI can show what is being requested; the ask
+      ;; itself rides out on the interrupt outcome at RUN_FINISHED.
+      (:proposed
+       (%start-tool encoder id (agent-invocation-name inv))
+       (%push encoder (ag-ui-protocol:make-tool-call-args-event
+                       :tool-call-id id
+                       :delta (or (agent-invocation-arguments inv) "{}")))
+       (%end-tool encoder id))
       (:running
        (%start-tool encoder id (agent-invocation-name inv)))
       ((:done :error :denied)
@@ -163,18 +183,53 @@
                        :content (or (agent-invocation-result inv) ""))))
       (t nil))))
 
+(defparameter +approval-response-schema-json+
+  "{\"type\":\"object\",\"properties\":{\"approved\":{\"type\":\"boolean\"},\"editedArgs\":{\"type\":\"object\",\"description\":\"Full replacement of the tool args. Not merged.\"}},\"required\":[\"approved\"]}"
+  "Response schema offered for tool-call interrupts. The presence of editedArgs
+   is the signal to a client that it may offer approve-with-edits.")
+
+(defun %approval-response-schema ()
+  (ag-ui-protocol:decode-json +approval-response-schema-json+))
+
+(defun invocation-interrupt (inv)
+  "One pending invocation as an AG-UI interrupt."
+  (let ((id (or (agent-invocation-id inv) "call")))
+    (ag-ui-protocol:make-interrupt
+     :id (format nil "int-~a" id)
+     :reason "tool_call"
+     :tool-call-id id
+     :message (format nil "Approve ~a?" (agent-invocation-name inv))
+     :response-schema (%approval-response-schema))))
+
+(defun run-interrupts (run)
+  "Interrupts for every invocation RUN is waiting on."
+  (when (agent-run-p run)
+    (mapcar #'invocation-interrupt
+            (remove-if-not (lambda (inv)
+                             (eq (agent-invocation-status inv) :proposed))
+                           (agent-run-pending run)))))
+
 (defun %encode-finished (encoder run)
   (%close-reasoning encoder)
   (%close-text encoder)
   (%end-open-tools encoder)
   (%finish-step encoder)
-  (if (and (agent-run-p run)
-           (eq (agent-run-finish-reason run) :canceled))
-      (%push encoder (ag-ui-protocol:make-run-error-event
-                      :message "canceled" :code "canceled"))
-      (%push encoder (ag-ui-protocol:make-run-finished-event
-                      :thread-id (encoder-thread-id encoder)
-                      :run-id (encoder-run-id encoder)))))
+  (let ((interrupts (run-interrupts run)))
+    (cond
+      ((and (agent-run-p run) (eq (agent-run-finish-reason run) :canceled))
+       (%push encoder (ag-ui-protocol:make-run-error-event
+                       :message "canceled" :code "canceled")))
+      ;; Paused for approval: end the run with an interrupt outcome so the
+      ;; client knows to ask, rather than finishing as if nothing were pending.
+      (interrupts
+       (%push encoder (ag-ui-protocol:make-run-interrupted-event
+                       :thread-id (encoder-thread-id encoder)
+                       :run-id (encoder-run-id encoder)
+                       :interrupts interrupts)))
+      (t
+       (%push encoder (ag-ui-protocol:make-run-finished-event
+                       :thread-id (encoder-thread-id encoder)
+                       :run-id (encoder-run-id encoder)))))))
 
 (defun %encode-error (encoder payload)
   (%close-reasoning encoder)
@@ -259,6 +314,60 @@
        :error-callback (lambda (c)
                          (encode-agent-event encoder :error c)
                          (when error-callback (funcall error-callback c)))))))
+
+(defun %invocation-for-interrupt (run interrupt-id)
+  (find-if (lambda (inv)
+             (equal (format nil "int-~a" (agent-invocation-id inv)) interrupt-id))
+           (agent-run-pending run)))
+
+(defun apply-resume (run input)
+  "Apply INPUT's resume entries to RUN's pending invocations.
+
+   Validates against the interrupts RUN actually has open first, so a resume
+   that violates the contract signals AG-UI-RESUME-ERROR rather than half
+   applying. Returns the number of invocations decided."
+  (let ((interrupts (run-interrupts run))
+        (entries (coerce (or (ag-ui-protocol:event-field input 'ag-ui-protocol::resume)
+                             #())
+                         'list))
+        (decided 0))
+    (ag-ui-protocol:validate-resume interrupts entries)
+    (dolist (entry entries decided)
+      (let ((inv (%invocation-for-interrupt
+                  run (ag-ui-protocol:resume-interrupt-id entry))))
+        (when inv
+          (incf decided)
+          (if (ag-ui-protocol:resume-approved-p entry)
+              (let ((edited (ag-ui-protocol:resume-edited-args entry)))
+                ;; editedArgs fully replaces the proposed arguments.
+                (when edited
+                  (setf (agent-invocation-arguments inv)
+                        (ag-ui-protocol:encode-json edited)))
+                (approve-invocation run inv))
+              (deny-invocation
+               run inv
+               :reason (if (equal (ag-ui-protocol:resume-status entry) "cancelled")
+                           "cancelled"
+                           "denied"))))))))
+
+(defun resume-ag-ui-agent-run (run input &key on-event)
+  "Answer RUN's open interrupts from INPUT and continue it, encoding AG-UI
+   events onto ON-EVENT. The resumed run re-uses the original tool call ids, so
+   it emits TOOL_CALL_RESULT without re-proposing the call."
+  (multiple-value-bind (thread run-id) (%input-ids input)
+    (let ((encoder (make-ag-ui-encoder :thread-id thread :run-id run-id
+                                       :on-event on-event)))
+      ;; Note the ids before resuming: once the run continues they leave
+      ;; `pending` and there is no way to tell them from fresh calls.
+      (dolist (inv (agent-run-pending run))
+        (mark-tool-resumed encoder (agent-invocation-id inv)))
+      (apply-resume run input)
+      (handler-case
+          (resume-ai-agent run
+                           :on-event (lambda (kind payload)
+                                       (encode-agent-event encoder kind payload)))
+        (error (c) (encode-agent-event encoder :error c)))
+      (ag-ui-encoder-events encoder))))
 
 (defun make-ai-agent-ag-ui-handler (agent &key settings)
   "Sync AG-UI handler. Emits via AG-UI-EMIT as events are encoded while awaiting."
