@@ -160,21 +160,26 @@
    (handle :initarg :handle :accessor agent-run-handle
            :initform (make-instance 'agent-run-handle))
    (on-event :initarg :on-event :accessor agent-run-on-event :initform nil)
+   (on-part :initarg :on-part :accessor agent-run-on-part :initform nil)
+   (in-flight-turn :initarg :in-flight-turn :accessor agent-run-in-flight-turn
+                   :initform nil)
    (sources :initarg :sources :accessor agent-run-sources :initform nil)
    (extra :initarg :extra :accessor agent-run-extra :initform nil)
    (settings :initarg :settings :accessor agent-run-settings
              :initform (make-agent-settings))))
 
 (defun make-agent-run (&key agent turns invocations pending (step 0)
-                         finish-reason last-response handle on-event sources
-                         extra settings)
+                         finish-reason last-response handle on-event on-part
+                         in-flight-turn sources extra settings)
   (let* ((h (or handle (make-instance 'agent-run-handle)))
          (run (make-instance 'agent-run
                              :agent agent :turns turns
                              :invocations invocations :pending pending
                              :step step :finish-reason finish-reason
                              :last-response last-response :handle h
-                             :on-event on-event :sources sources :extra extra
+                             :on-event on-event :on-part on-part
+                             :in-flight-turn in-flight-turn
+                             :sources sources :extra extra
                              :settings (coerce-agent-settings settings))))
     (setf (agent-run-handle-run h) run)
     run))

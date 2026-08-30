@@ -1,5 +1,5 @@
 (defsystem "ai-agent-protocol"
-  :version "0.1.1"
+  :version "0.2.0"
   :description "Async-first CLOS agent protocol over llm-protocol (CL tools, invocations, approvals)"
   :author "egao1980"
   :license "MIT"
@@ -32,8 +32,8 @@
   :in-order-to ((test-op (test-op "ai-agent-protocol/tests"))))
 
 (defsystem "ai-agent-protocol/ag-ui"
-  :version "0.1.0"
-  :description "Expose an ai-agent via ag-ui-protocol"
+  :version "0.2.0"
+  :description "Streaming encoder from ai-agent on-event to AG-UI events"
   :author "egao1980"
   :license "MIT"
   :depends-on ("ai-agent-protocol" "ag-ui-protocol")

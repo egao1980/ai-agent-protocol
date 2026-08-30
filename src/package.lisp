@@ -93,6 +93,9 @@
    #:agent-run-last-response
    #:agent-run-text
    #:agent-run-handle
+   #:agent-run-on-event
+   #:agent-run-on-part
+   #:agent-run-in-flight-turn
 
    #:agent-run-handle
    #:agent-run-handle-p
@@ -114,6 +117,8 @@
    #:resume-ai-agent
    #:approve-invocation
    #:deny-invocation
-   #:complete-invocation))
+   #:complete-invocation
+
+   #:*off-loop-specials*))
 
 (in-package #:ai-agent-protocol)

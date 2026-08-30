@@ -160,3 +160,106 @@
                           :stop-when-idle t)
       (ok (or (null run)
               (eq :canceled (agent-run-finish-reason run)))))))
+
+(deftest stream-parts-and-on-part
+  (with-agent-loop
+    (let* ((kinds '())
+           (parts '())
+           (backend (make-mock-llm-backend
+                     :handler (lambda (b turns &key &allow-other-keys)
+                                (declare (ignore b turns))
+                                (make-llm-response
+                                 :parts (list (make-llm-text-part :text "hel")
+                                              (make-llm-text-part :text "lo"))
+                                 :finish-reason :stop))))
+           (agent (make-ai-agent :name "echo" :backend backend))
+           (run (run-ai-agent agent "hi"
+                              :on-event (lambda (k p)
+                                          (push k kinds)
+                                          (when (eq k :part) (push p parts)))
+                              :on-part (lambda (p) (push (llm-text-part-text p) parts)))))
+      (ok (eq :stop (agent-run-finish-reason run)))
+      (ok (equal '(:started :step :part :part :response :finished)
+                 (reverse kinds)))
+      (ok (find "hel" parts :test #'equal))
+      (ok (find "lo" parts :test #'equal))
+      (ok (equal "hello" (agent-run-text run)))
+      (let ((asst (find :assistant (agent-run-turns run) :key #'llm-turn-role :from-end t)))
+        (ok asst)
+        (ok (= 2 (length (llm-turn-parts asst))))))))
+
+(deftest tool-call-argument-suffix
+  (with-agent-loop
+    (let* ((seen-args nil)
+           (backend (make-mock-llm-backend
+                     :handler (%one-shot-tools
+                               (list (make-llm-tool-call-part
+                                      :id "c1" :name "sum" :arguments "{\"a\":")
+                                     (make-llm-tool-call-part
+                                      :id "c1" :name "sum" :arguments "1}"))
+                               "3")))
+           (agent (make-ai-agent :name "math" :backend backend)))
+      (define-agent-tool agent "sum" () (args)
+        (setf seen-args args)
+        "3")
+      (let ((run (run-ai-agent agent "1")))
+        (ok (equal "{\"a\":1}" seen-args))
+        (ok (= 1 (length (agent-run-invocations run))))
+        (ok (equal "{\"a\":1}"
+                   (agent-invocation-arguments
+                    (first (agent-run-invocations run)))))))))
+
+(defclass %generate-only-backend (llm-backend) ())
+
+(defmethod generate ((backend %generate-only-backend) turns &key &allow-other-keys)
+  (declare (ignore turns))
+  (make-llm-response :parts (list (make-llm-text-part :text "only-gen"))
+                     :finish-reason :stop))
+
+(deftest generate-only-fallback-emits-parts
+  (with-agent-loop
+    (let* ((parts '())
+           (agent (make-ai-agent :backend (make-instance '%generate-only-backend)))
+           (run (run-ai-agent agent "hi"
+                              :on-part (lambda (p) (push p parts)))))
+      (ok (eq :stop (agent-run-finish-reason run)))
+      (ok (equal "only-gen" (agent-run-text run)))
+      (ok (= 1 (length parts)))
+      (ok (llm-text-part-p (first parts))))))
+
+(deftest invocation-events-on-tool
+  (with-agent-loop
+    (let* ((statuses '())
+           (backend (make-mock-llm-backend
+                     :handler (%one-shot-tools
+                               (list (make-llm-tool-call-part
+                                      :id "c1" :name "sum" :arguments "{}"))
+                               "3")))
+           (agent (make-ai-agent :backend backend)))
+      (define-agent-tool agent "sum" () (args)
+        (declare (ignore args))
+        "3")
+      (run-ai-agent agent "1+2"
+                    :on-event (lambda (k p)
+                                (when (eq k :invocation)
+                                  (push (agent-invocation-status p) statuses))))
+      (ok (equal '(:approved :running :done) (reverse statuses))))))
+
+(defvar *off-loop-probe* :unset)
+
+(deftest off-loop-rebinds-specials
+  (with-agent-loop
+    (let* ((*off-loop-probe* :from-owner)
+           (*off-loop-specials* (cons '*off-loop-probe* *off-loop-specials*))
+           (seen :unset)
+           (backend (make-mock-llm-backend
+                     :handler (lambda (b turns &key &allow-other-keys)
+                                (declare (ignore b turns))
+                                (setf seen *off-loop-probe*)
+                                (make-llm-response
+                                 :parts (list (make-llm-text-part :text "ok"))
+                                 :finish-reason :stop))))
+           (agent (make-ai-agent :name "spec" :backend backend))
+           (run (run-ai-agent agent "hi")))
+      (ok (eq :stop (agent-run-finish-reason run)))
+      (ok (eq :from-owner seen)))))

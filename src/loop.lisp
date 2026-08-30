@@ -59,6 +59,84 @@
                (agent-run-sources run))
       (%handoff-for run name)))
 
+(defun %emit-invocation (run inv)
+  "Emit :invocation for statuses the transformer / TUI care about."
+  (when (member (agent-invocation-status inv)
+                '(:approved :running :done :error :denied) :test #'eq)
+    (%emit run :invocation inv)))
+
+(defun %merge-part-into-turn (turn part)
+  "Append PART. Same-id tool-call parts concatenate ARGUMENTS (delta suffix).
+   Copy tool-call parts so we do not mutate the backend's response objects."
+  (cond
+    ((llm-tool-call-part-p part)
+     (let* ((id (llm-tool-call-part-id part))
+            (existing (find-if (lambda (p)
+                                 (and (llm-tool-call-part-p p)
+                                      (equal (llm-tool-call-part-id p) id)))
+                               (llm-turn-parts turn))))
+       (if existing
+           (setf (llm-tool-call-part-arguments existing)
+                 (concatenate 'string
+                              (or (llm-tool-call-part-arguments existing) "")
+                              (or (llm-tool-call-part-arguments part) "")))
+           (setf (llm-turn-parts turn)
+                 (append (llm-turn-parts turn)
+                         (list (make-llm-tool-call-part
+                                :id id
+                                :name (llm-tool-call-part-name part)
+                                :arguments (or (llm-tool-call-part-arguments part) ""))))))))
+    (t
+     (setf (llm-turn-parts turn)
+           (append (llm-turn-parts turn) (list part))))))
+
+(defun %append-in-flight-part (run part)
+  "First :part of a step opens an assistant turn; later parts merge into it."
+  (let ((turn (agent-run-in-flight-turn run)))
+    (unless turn
+      (setf turn (make-llm-turn :role :assistant :parts nil)
+            (agent-run-in-flight-turn run) turn
+            (agent-run-turns run) (append (agent-run-turns run) (list turn))))
+    (%merge-part-into-turn turn part)))
+
+(defun %coalesce-parts (parts)
+  "Merge same-id tool-call parts (argument suffixes) into one part each."
+  (let ((out '())
+        (tools (make-hash-table :test #'equal)))
+    (dolist (p parts)
+      (if (llm-tool-call-part-p p)
+          (let* ((id (llm-tool-call-part-id p))
+                 (ex (gethash id tools)))
+            (if ex
+                (setf (llm-tool-call-part-arguments ex)
+                      (concatenate 'string
+                                   (or (llm-tool-call-part-arguments ex) "")
+                                   (or (llm-tool-call-part-arguments p) "")))
+                (let ((copy (make-llm-tool-call-part
+                             :id id
+                             :name (llm-tool-call-part-name p)
+                             :arguments (or (llm-tool-call-part-arguments p) ""))))
+                  (setf (gethash id tools) copy)
+                  (push copy out))))
+          (push p out)))
+    (nreverse out)))
+
+(defun %commit-assistant-turn (run response)
+  "RESPONSE parts are source of truth. Do not append a second assistant turn."
+  (let ((existing (agent-run-in-flight-turn run))
+        (parts (%coalesce-parts (copy-list (llm-response-parts response)))))
+    (setf (agent-run-in-flight-turn run) nil)
+    (if existing
+        (setf (llm-turn-parts existing) parts)
+        (setf (agent-run-turns run)
+              (append (agent-run-turns run)
+                      (list (make-llm-turn :role :assistant :parts parts)))))))
+
+(defun %committed-tool-calls (run)
+  "Tool-call parts from the committed assistant turn (same-id suffixes already merged)."
+  (let ((turn (find :assistant (agent-run-turns run) :key #'llm-turn-role :from-end t)))
+    (and turn (remove-if-not #'llm-tool-call-part-p (llm-turn-parts turn)))))
+
 (defun %append-invocation-turn (run inv)
   (unless (agent-invocation-recorded-p inv)
     (setf (agent-run-turns run)
@@ -124,6 +202,7 @@
        (setf (agent-invocation-status inv) :proposed))
       (t
        (setf (agent-invocation-status inv) :approved)))
+    (%emit-invocation run inv)
     inv))
 
 (defun %offer-approval (run inv)
@@ -132,12 +211,14 @@
         (signal 'agent-approval-required :run run :invocation inv)
       (approve ()
         :report "Approve the tool invocation"
-        (setf (agent-invocation-status inv) :approved))
+        (setf (agent-invocation-status inv) :approved)
+        (%emit-invocation run inv))
       (deny ()
         :report "Deny the tool invocation"
         (setf (agent-invocation-status inv) :denied
               (agent-invocation-result inv) "denied"
-              (agent-invocation-error-p inv) nil))
+              (agent-invocation-error-p inv) nil)
+        (%emit-invocation run inv))
       (pause-for-approval ()
         :report "Pause the run for HITL approval"
         nil))))
@@ -185,6 +266,7 @@
                         (%after-invocations run callback error-callback)))))))
           (dolist (inv invs)
             (setf (agent-invocation-status inv) :running)
+            (%emit-invocation run inv)
             (invoke-tool-async (agent-invocation-source inv)
                                (agent-invocation-name inv)
                                (agent-invocation-arguments inv)
@@ -194,6 +276,7 @@
                                                  (if (stringp result)
                                                      result
                                                      (princ-to-string result)))
+                                           (%emit-invocation run inv)
                                            (one-done))
                                :error-callback (lambda (c)
                                                  (let ((act
@@ -218,11 +301,14 @@
                                                           (skip-tool ()
                                                             :report "Record the tool error and continue"
                                                             (progn :skip)))))
+                                                   (when (eq act :used)
+                                                     (%emit-invocation run inv))
                                                    (when (eq act :skip)
                                                      (setf (agent-invocation-status inv) :error
                                                            (agent-invocation-error-p inv) t
                                                            (agent-invocation-result inv)
-                                                           (princ-to-string c)))
+                                                           (princ-to-string c))
+                                                     (%emit-invocation run inv))
                                                    (one-done)))))))))
 
 (defun %on-generate (run response callback error-callback)
@@ -230,14 +316,10 @@
       (progn
         (when (%check-canceled run callback)
           (return-from %on-generate))
-        (setf (agent-run-last-response run) response
-              (agent-run-turns run)
-              (append (agent-run-turns run)
-                      (list (make-llm-turn
-                             :role :assistant
-                             :parts (copy-list (llm-response-parts response))))))
+        (setf (agent-run-last-response run) response)
+        (%commit-assistant-turn run response)
         (%emit run :response response)
-        (let ((calls (llm-response-tool-calls response))
+        (let ((calls (%committed-tool-calls run))
               (reason (llm-response-finish-reason response)))
           (cond
             ((null calls)
@@ -254,6 +336,7 @@
                              (agent-invocation-result handoff)
                              (format nil "handed off to ~a"
                                      (ai-agent-name (agent-invocation-source handoff))))
+                       (%emit-invocation run handoff)
                        (%append-invocation-turn run handoff)
                        (%tick-run run callback error-callback))
                      (let ((ready (remove-if-not
@@ -266,14 +349,34 @@
 
 (defun %do-generate (run callback error-callback)
   (let ((choice (%tool-choice run)))
-    (%off-loop
-     (lambda ()
-       (generate (%backend run)
-                 (agent-run-turns run)
-                 :settings (agent-settings-llm (agent-run-settings run))
-                 :tools (collect-run-tools (agent-run-agent run)
-                                           :extra (agent-run-extra run))
-                 :tool-choice choice))
+    (multiple-value-bind (eb el) (%event-context)
+      (%off-loop
+       (lambda ()
+         (flet ((emit-part (part)
+                  (let ((p part))
+                    ;; Capture EB/EL — worker has no *event-loop* binding.
+                    (event:wake-call eb el
+                                     (lambda ()
+                                       (%append-in-flight-part run p)
+                                       (%emit run :part p))))))
+           (handler-case
+               (stream-generate (%backend run)
+                                (agent-run-turns run)
+                                :settings (agent-settings-llm (agent-run-settings run))
+                                :tools (collect-run-tools (agent-run-agent run)
+                                                          :extra (agent-run-extra run))
+                                :tool-choice choice
+                                :on-part #'emit-part)
+             (llm-unsupported ()
+               (let ((response (generate (%backend run)
+                                         (agent-run-turns run)
+                                         :settings (agent-settings-llm (agent-run-settings run))
+                                         :tools (collect-run-tools (agent-run-agent run)
+                                                                   :extra (agent-run-extra run))
+                                         :tool-choice choice)))
+                 (dolist (part (llm-response-parts response))
+                   (emit-part part))
+                 response)))))
      (lambda (response)
        (%on-generate run response callback error-callback))
      (lambda (c)
@@ -299,7 +402,7 @@
            ((eq act :retry)
             (%do-generate run callback error-callback))
            ((eq act :fail)
-            (funcall error-callback c))))))))
+            (funcall error-callback c)))))))))
 
 (defun %tick-run (run callback error-callback)
   (when (%check-canceled run callback)
@@ -327,7 +430,7 @@
     (%do-generate run callback error-callback)))
 
 (defmethod run-ai-agent-async ((agent ai-agent) turns &key settings tools on-event
-                               callback error-callback)
+                               on-part callback error-callback)
   (%event-context)
   (let* ((settings (or (and settings (coerce-agent-settings settings))
                        (coerce-agent-settings (ai-agent-settings agent))))
@@ -338,6 +441,7 @@
                :turns (prepare-agent-turns agent turns)
                :handle handle
                :on-event on-event
+               :on-part on-part
                :extra extra
                :sources (append (ai-agent-tools agent)
                                 (ai-agent-handoffs agent)
@@ -350,10 +454,12 @@
     handle))
 
 (defmethod resume-ai-agent-async ((run agent-run) &key callback error-callback
-                                  on-event)
+                                  on-event on-part)
   (%event-context)
   (when on-event
     (setf (agent-run-on-event run) on-event))
+  (when on-part
+    (setf (agent-run-on-part run) on-part))
   (setf (agent-run-finish-reason run) nil)
   (let ((ok (or callback (lambda (v) (declare (ignore v)))))
         (err (or error-callback #'error))
