@@ -1,9 +1,9 @@
 (defsystem "ai-agent-protocol"
-  :version "0.2.0"
+  :version "0.2.1"
   :description "Async-first CLOS agent protocol over llm-protocol (CL tools, invocations, approvals)"
   :author "egao1980"
   :license "MIT"
-  :depends-on ("llm-protocol" "event-protocol" "bordeaux-threads")
+  :depends-on ("llm-protocol" "event-protocol" "bordeaux-threads" "conversation-protocol")
   :properties (:cl-repo
                (:ci (:with ("ai-agent-protocol/mcp"
                             "ai-agent-protocol/ag-ui"

@@ -263,3 +263,50 @@
            (run (run-ai-agent agent "hi")))
       (ok (eq :stop (agent-run-finish-reason run)))
       (ok (eq :from-owner seen)))))
+
+(deftest memory-recalls-across-runs
+  (with-agent-loop
+    (let* ((backend (make-mock-llm-backend))
+           (mem (conversation-protocol:make-buffer-memory :session "echo"))
+           (agent (make-ai-agent :name "echo" :backend backend
+                                 :instructions "Be brief."
+                                 :memory mem
+                                 :session "echo"))
+           (r1 (run-ai-agent agent "hi"))
+           (r2 (run-ai-agent agent "again")))
+      (ok (eq :stop (agent-run-finish-reason r1)))
+      (ok (equal "echo: hi" (agent-run-text r1)))
+      (ok (equal "echo: again" (agent-run-text r2)))
+      (let ((texts (mapcar #'turn-text (agent-run-turns r2))))
+        (ok (find "hi" texts :test #'equal))
+        (ok (find "again" texts :test #'equal))
+        (ok (find "echo: hi" texts :test #'equal))))))
+
+(deftest memory-session-kw-isolated
+  (with-agent-loop
+    (let* ((backend (make-mock-llm-backend))
+           (mem (conversation-protocol:make-buffer-memory))
+           (agent (make-ai-agent :name "echo" :backend backend :memory mem))
+           (r1 (run-ai-agent agent "alpha" :session "a"))
+           (r2 (run-ai-agent agent "beta" :session "b")))
+      (ok (eq :stop (agent-run-finish-reason r1)))
+      (ok (eq :stop (agent-run-finish-reason r2)))
+      (ng (find "alpha" (mapcar #'turn-text (agent-run-turns r2)) :test #'equal))
+      (ok (find "beta" (mapcar #'turn-text (agent-run-turns r2)) :test #'equal)))))
+
+(deftest memory-window-drops-old-turns
+  (with-agent-loop
+    (let* ((backend (make-mock-llm-backend))
+           (mem (conversation-protocol:make-window-memory :window-size 2
+                                                          :session "w"))
+           (agent (make-ai-agent :name "echo" :backend backend
+                                 :instructions "Be brief."
+                                 :memory mem
+                                 :session "w")))
+      (run-ai-agent agent "one")
+      (run-ai-agent agent "two")
+      (let* ((r3 (run-ai-agent agent "three"))
+             (texts (mapcar #'turn-text (agent-run-turns r3))))
+        (ng (find "one" texts :test #'equal))
+        (ok (find "two" texts :test #'equal))
+        (ok (find "three" texts :test #'equal))))))
