@@ -37,6 +37,14 @@ Primitive = callback + cancel token (http `send-async` shape). No Blackbird in t
 
 CL tools: `function-tool` / `define-agent-tool`. Nested agent in `:tools` = one peer tool. `:handoffs` = specialist replaces `agent-run-agent` and continues the same turns. `defagent` → `defclass` + `:default-initargs`.
 
+Optional [`conversation-protocol`](https://github.com/egao1980/conversation-protocol) `:memory` — `prepare-agent-turns` recalls, terminal finish remembers (`:replace t`). Session is `:session` on the agent or `run-ai-agent`. Approval / deferred pauses do not persist.
+
+```lisp
+(make-ai-agent :name "echo" :backend backend
+               :memory (stack-conversation:make-window-memory :window-size 8)
+               :session "chat-1")
+```
+
 MCP sampling (`create-message` → `generate`) is `ai-agent-protocol/mcp:make-mcp-sampling-handler` — **not** in `llm-protocol`.
 
 Live LM Studio cycle (instructions + user prompt + CL `add` tool):

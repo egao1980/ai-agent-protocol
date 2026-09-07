@@ -24,13 +24,24 @@ Specialize to filter/prefix/inject. EXTRA is appended to AGENT-TOOLS.")
                               (copy-list extra))
                       :context context)))
 
+(defun %agent-session (agent &optional context session)
+  (conversation:coerce-session
+   (or session
+       (and (consp context) (getf context :session))
+       (ai-agent-session agent)
+       (ai-agent-name agent))))
+
 (defgeneric prepare-agent-turns (agent turns &key context)
   (:documentation "Normalize TURNS before the first GENERATE. :AROUND / subclass
-to inject instructions or rewrite history.")
+to inject instructions or rewrite history. Bound MEMORY recalls first.")
   (:method ((agent ai-agent) turns &key context)
-    (declare (ignore context))
-    (let ((ts (coerce-turns turns))
-          (sys (ai-agent-instructions agent)))
+    (let* ((mem (ai-agent-memory agent))
+           (incoming (coerce-turns turns))
+           (ts (if mem
+                   (conversation:recall mem incoming
+                                        :session (%agent-session agent context))
+                   incoming))
+           (sys (ai-agent-instructions agent)))
       (if (and sys (plusp (length (string sys)))
                (not (find :system ts :key #'llm-turn-role)))
           (cons (system-turn sys) ts)
@@ -144,15 +155,17 @@ Sync handlers run off the event loop. An AI-AGENT source runs as a subagent.")
     (cancel-agent-run (agent-run-handle run))))
 
 (defgeneric run-ai-agent-async (agent turns &key settings tools on-event
-                                on-part callback error-callback)
+                                on-part callback error-callback session)
   (:documentation "Async primitive. CALLBACK gets an AGENT-RUN.
 TOOLS are extra sources for this run (appended). ON-EVENT is (kind payload).
 ON-PART is (lambda (llm-part)) in addition to :part on-event.
+SESSION overrides AI-AGENT-SESSION for recall/remember.
 Returns AGENT-RUN-HANDLE."))
 
-(defgeneric run-ai-agent (agent turns &key settings tools on-event on-part)
+(defgeneric run-ai-agent (agent turns &key settings tools on-event on-part
+                          session)
   (:documentation "Await RUN-AI-AGENT-ASYNC (drives the bound event loop).")
-  (:method ((agent ai-agent) turns &key settings tools on-event on-part)
+  (:method ((agent ai-agent) turns &key settings tools on-event on-part session)
     (let ((timeout (agent-settings-timeout
                     (or (and settings (coerce-agent-settings settings))
                         (ai-agent-settings agent)))))
@@ -160,6 +173,7 @@ Returns AGENT-RUN-HANDLE."))
                 (run-ai-agent-async agent turns
                                     :settings settings :tools tools
                                     :on-event on-event :on-part on-part
+                                    :session session
                                     :callback ok :error-callback err))
               :timeout timeout))))
 
@@ -218,7 +232,8 @@ Returns AGENT-RUN-HANDLE."))
 
 (defmacro defagent (name superclasses &body body)
   "Define an AI-AGENT subclass. Options: (:name \"x\") (:instructions \"…\")
-   (:settings form) (:tools form) (:handoffs form). Slot forms like DEFCLASS.
+   (:settings form) (:tools form) (:handoffs form) (:memory form) (:session form).
+   Slot forms like DEFCLASS.
    (defagent researcher ()
      \"Looks things up.\"
      (:name \"researcher\")
@@ -235,7 +250,9 @@ Returns AGENT-RUN-HANDLE."))
           (:instructions (setf initargs (list* :instructions (second opt) initargs)))
           (:settings (setf initargs (list* :settings (second opt) initargs)))
           (:tools (setf initargs (list* :tools (second opt) initargs)))
-          (:handoffs (setf initargs (list* :handoffs (second opt) initargs)))))
+          (:handoffs (setf initargs (list* :handoffs (second opt) initargs)))
+          (:memory (setf initargs (list* :memory (second opt) initargs)))
+          (:session (setf initargs (list* :session (second opt) initargs)))))
       `(progn
          (defclass ,name ,supers
            ,slots

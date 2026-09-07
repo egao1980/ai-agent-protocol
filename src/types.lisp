@@ -52,16 +52,21 @@
    (tools :initarg :tools :accessor ai-agent-tools :initform nil)
    (handoffs :initarg :handoffs :accessor ai-agent-handoffs :initform nil)
    (settings :initarg :settings :accessor ai-agent-settings
-             :initform (make-agent-settings))))
+             :initform (make-agent-settings))
+   (memory :initarg :memory :accessor ai-agent-memory :initform nil)
+   (session :initarg :session :accessor ai-agent-session :initform nil)))
 
-(defun make-ai-agent (&key (name "agent") backend instructions tools handoffs settings)
+(defun make-ai-agent (&key (name "agent") backend instructions tools handoffs settings
+                        memory session)
   (make-instance 'ai-agent
                  :name name
                  :backend (or backend llm-protocol:*llm-backend*)
                  :instructions instructions
                  :tools (copy-list tools)
                  :handoffs (copy-list handoffs)
-                 :settings (coerce-agent-settings settings)))
+                 :settings (coerce-agent-settings settings)
+                 :memory memory
+                 :session session))
 
 (defun ai-agent-p (x)
   (typep x 'ai-agent))
@@ -166,11 +171,13 @@
    (sources :initarg :sources :accessor agent-run-sources :initform nil)
    (extra :initarg :extra :accessor agent-run-extra :initform nil)
    (settings :initarg :settings :accessor agent-run-settings
-             :initform (make-agent-settings))))
+             :initform (make-agent-settings))
+   (session :initarg :session :accessor agent-run-session :initform nil)
+   (memory :initarg :memory :accessor agent-run-memory :initform nil)))
 
 (defun make-agent-run (&key agent turns invocations pending (step 0)
                          finish-reason last-response handle on-event on-part
-                         in-flight-turn sources extra settings)
+                         in-flight-turn sources extra settings session memory)
   (let* ((h (or handle (make-instance 'agent-run-handle)))
          (run (make-instance 'agent-run
                              :agent agent :turns turns
@@ -180,7 +187,9 @@
                              :on-event on-event :on-part on-part
                              :in-flight-turn in-flight-turn
                              :sources sources :extra extra
-                             :settings (coerce-agent-settings settings))))
+                             :settings (coerce-agent-settings settings)
+                             :session session
+                             :memory memory)))
     (setf (agent-run-handle-run h) run)
     run))
 

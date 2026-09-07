@@ -2,7 +2,8 @@
   (:use #:cl #:llm-protocol)
   (:nicknames #:stack-ai-agent)
   (:local-nicknames (#:bt #:bordeaux-threads)
-                    (#:event #:event-protocol))
+                    (#:event #:event-protocol)
+                    (#:conversation #:conversation-protocol))
   (:export
    #:agent-condition
    #:agent-error
@@ -46,6 +47,8 @@
    #:ai-agent-handoffs
    #:ai-agent-settings
    #:ai-agent-name
+   #:ai-agent-memory
+   #:ai-agent-session
    #:register-agent-handoff
    #:unregister-agent-handoff
    #:defagent
@@ -96,6 +99,7 @@
    #:agent-run-on-event
    #:agent-run-on-part
    #:agent-run-in-flight-turn
+   #:agent-run-session
 
    #:agent-run-handle
    #:agent-run-handle-p

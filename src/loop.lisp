@@ -25,8 +25,22 @@
 (defun %canceled-p (run)
   (agent-run-handle-canceled-p (agent-run-handle run)))
 
+(defun %terminal-finish-p (reason)
+  (not (member reason '(:approval :deferred) :test #'eq)))
+
+(defun %remember-run (run)
+  (let ((mem (or (agent-run-memory run)
+                 (ai-agent-memory (agent-run-agent run)))))
+    (when mem
+      (conversation:remember mem (agent-run-turns run)
+                             :session (or (agent-run-session run)
+                                          (%agent-session (agent-run-agent run)))
+                             :replace t))))
+
 (defun %finish (run reason callback)
   (setf (agent-run-finish-reason run) reason)
+  (when (%terminal-finish-p reason)
+    (%remember-run run))
   (%emit run :finished run)
   (funcall callback run)
   run)
@@ -430,15 +444,17 @@
     (%do-generate run callback error-callback)))
 
 (defmethod run-ai-agent-async ((agent ai-agent) turns &key settings tools on-event
-                               on-part callback error-callback)
+                               on-part callback error-callback session)
   (%event-context)
   (let* ((settings (or (and settings (coerce-agent-settings settings))
                        (coerce-agent-settings (ai-agent-settings agent))))
          (handle (make-instance 'agent-run-handle))
          (extra (copy-list tools))
+         (sid (%agent-session agent nil session))
          (run (make-agent-run
                :agent agent
-               :turns (prepare-agent-turns agent turns)
+               :turns (prepare-agent-turns agent turns
+                                           :context (list :session sid))
                :handle handle
                :on-event on-event
                :on-part on-part
@@ -446,7 +462,9 @@
                :sources (append (ai-agent-tools agent)
                                 (ai-agent-handoffs agent)
                                 extra)
-               :settings settings))
+               :settings settings
+               :session sid
+               :memory (ai-agent-memory agent)))
          (ok (or callback (lambda (v) (declare (ignore v)))))
          (err (or error-callback #'error)))
     (%emit run :started run)
