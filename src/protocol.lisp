@@ -41,10 +41,14 @@ to inject instructions or rewrite history. Bound MEMORY recalls first.")
                    (conversation:recall mem incoming
                                         :session (%agent-session agent context))
                    incoming))
-           (sys (ai-agent-instructions agent)))
-      (if (and sys (plusp (length (string sys)))
-               (not (find :system ts :key #'llm-turn-role)))
-          (cons (system-turn sys) ts)
+           (sys (ai-agent-instructions agent))
+           (ts (if (and sys (plusp (length (string sys)))
+                        (not (find :system ts :key #'llm-turn-role)))
+                   (cons (system-turn sys) ts)
+                   ts))
+           (steer (ai-agent-steering agent)))
+      (if steer
+          (steer:apply-steering ts steer)
           ts))))
 
 (defgeneric agent-approve-p (agent source name arguments &key context)
@@ -232,7 +236,8 @@ Returns AGENT-RUN-HANDLE."))
 
 (defmacro defagent (name superclasses &body body)
   "Define an AI-AGENT subclass. Options: (:name \"x\") (:instructions \"…\")
-   (:settings form) (:tools form) (:handoffs form) (:memory form) (:session form).
+   (:settings form) (:tools form) (:handoffs form) (:memory form) (:session form)
+   (:steering form).
    Slot forms like DEFCLASS.
    (defagent researcher ()
      \"Looks things up.\"
@@ -252,7 +257,8 @@ Returns AGENT-RUN-HANDLE."))
           (:tools (setf initargs (list* :tools (second opt) initargs)))
           (:handoffs (setf initargs (list* :handoffs (second opt) initargs)))
           (:memory (setf initargs (list* :memory (second opt) initargs)))
-          (:session (setf initargs (list* :session (second opt) initargs)))))
+          (:session (setf initargs (list* :session (second opt) initargs)))
+          (:steering (setf initargs (list* :steering (second opt) initargs)))))
       `(progn
          (defclass ,name ,supers
            ,slots

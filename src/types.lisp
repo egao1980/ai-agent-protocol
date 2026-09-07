@@ -54,10 +54,11 @@
    (settings :initarg :settings :accessor ai-agent-settings
              :initform (make-agent-settings))
    (memory :initarg :memory :accessor ai-agent-memory :initform nil)
-   (session :initarg :session :accessor ai-agent-session :initform nil)))
+   (session :initarg :session :accessor ai-agent-session :initform nil)
+   (steering :initarg :steering :accessor ai-agent-steering :initform nil)))
 
 (defun make-ai-agent (&key (name "agent") backend instructions tools handoffs settings
-                        memory session)
+                        memory session steering)
   (make-instance 'ai-agent
                  :name name
                  :backend (or backend llm-protocol:*llm-backend*)
@@ -66,10 +67,16 @@
                  :handoffs (copy-list handoffs)
                  :settings (coerce-agent-settings settings)
                  :memory memory
-                 :session session))
+                 :session session
+                 :steering (and steering (steer:coerce-steering steering))))
 
 (defun ai-agent-p (x)
   (typep x 'ai-agent))
+
+(defmethod initialize-instance :after ((agent ai-agent) &key)
+  (when (ai-agent-steering agent)
+    (setf (ai-agent-steering agent)
+          (steer:coerce-steering (ai-agent-steering agent)))))
 
 (defun register-agent-tool (agent tool)
   "Register TOOL (function-tool, llm-tool, or any list-agent-tools source) on AGENT."

@@ -310,3 +310,17 @@
         (ng (find "one" texts :test #'equal))
         (ok (find "two" texts :test #'equal))
         (ok (find "three" texts :test #'equal))))))
+
+(deftest steering-merges-into-system
+  (with-agent-loop
+    (let* ((backend (make-mock-llm-backend))
+           (agent (make-ai-agent
+                   :name "echo" :backend backend
+                   :instructions "Be brief."
+                   :steering (list (steer-protocol:make-steer-rule
+                                    "cite" :body "Always cite."))))
+           (run (run-ai-agent agent "hi"))
+           (sys (find :system (agent-run-turns run) :key #'llm-turn-role)))
+      (ok (search "Be brief." (turn-text sys)))
+      (ok (search "Always cite." (turn-text sys)))
+      (ok (eq :stop (agent-run-finish-reason run))))))
