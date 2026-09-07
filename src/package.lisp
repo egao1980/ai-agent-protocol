@@ -3,7 +3,8 @@
   (:nicknames #:stack-ai-agent)
   (:local-nicknames (#:bt #:bordeaux-threads)
                     (#:event #:event-protocol)
-                    (#:conversation #:conversation-protocol))
+                    (#:conversation #:conversation-protocol)
+                    (#:steer #:steer-protocol))
   (:export
    #:agent-condition
    #:agent-error
@@ -49,6 +50,7 @@
    #:ai-agent-name
    #:ai-agent-memory
    #:ai-agent-session
+   #:ai-agent-steering
    #:register-agent-handoff
    #:unregister-agent-handoff
    #:defagent

@@ -39,10 +39,14 @@ CL tools: `function-tool` / `define-agent-tool`. Nested agent in `:tools` = one 
 
 Optional [`conversation-protocol`](https://github.com/egao1980/conversation-protocol) `:memory` — `prepare-agent-turns` recalls, terminal finish remembers (`:replace t`). Session is `:session` on the agent or `run-ai-agent`. Approval / deferred pauses do not persist.
 
+Optional [`steer-protocol`](https://github.com/egao1980/steer-protocol) `:steering` — rules / `SKILL.md` skills (not A2A `agent-skill`). Applied after recall; merged into the system turn.
+
 ```lisp
 (make-ai-agent :name "echo" :backend backend
                :memory (stack-conversation:make-window-memory :window-size 8)
-               :session "chat-1")
+               :session "chat-1"
+               :steering (list (stack-steer:make-steer-rule "cite"
+                                                           :body "Always cite.")))
 ```
 
 MCP sampling (`create-message` → `generate`) is `ai-agent-protocol/mcp:make-mcp-sampling-handler` — **not** in `llm-protocol`.
