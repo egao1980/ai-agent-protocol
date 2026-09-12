@@ -39,7 +39,7 @@ CL tools: `function-tool` / `define-agent-tool`. Nested agent in `:tools` = one 
 
 Optional [`conversation-protocol`](https://github.com/egao1980/conversation-protocol) `:memory` — `prepare-agent-turns` recalls, terminal finish remembers (`:replace t`). Session is `:session` on the agent or `run-ai-agent`. Approval / deferred pauses do not persist.
 
-Optional [`steer-protocol`](https://github.com/egao1980/steer-protocol) `:steering` — rules / `SKILL.md` skills (not A2A `agent-skill`). Applied after recall; merged into the system turn.
+Optional [`steer-protocol`](https://github.com/egao1980/steer-protocol) `:steering` — rules / `SKILL.md` skills (not A2A `agent-skill`). Applied after recall; merged into the system turn. `make-skill-tool-source` is a thin tool source that lists `skill-tools` and dispatches `skill-tool-fn` (same shape as `make-mcp-tool-source`).
 
 ```lisp
 (make-ai-agent :name "echo" :backend backend

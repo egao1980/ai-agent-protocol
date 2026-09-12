@@ -324,3 +324,33 @@
       (ok (search "Be brief." (turn-text sys)))
       (ok (search "Always cite." (turn-text sys)))
       (ok (eq :stop (agent-run-finish-reason run))))))
+
+(deftest skill-tool-source-lists-and-invokes
+  (with-agent-loop
+    (let* ((sk (steer-protocol:make-steer-skill
+                "review"
+                :extra (list :skill-tools
+                             (list (make-llm-tool :name "lookup"
+                                                  :description "Look up")))))
+           (src nil)
+           (backend (make-mock-llm-backend
+                     :handler (%one-shot-tools
+                               (list (make-llm-tool-call-part
+                                      :id "c1" :name "lookup" :arguments "{}"))
+                               "done"))))
+      (steer-protocol:register-skill-tool-fn
+       sk "lookup" (lambda (args)
+                     (declare (ignore args))
+                     "symbol-found"))
+      (setf src (make-skill-tool-source sk))
+      (let ((tools (list-agent-tools src)))
+        (ok (= 1 (length tools)))
+        (ok (equal "lookup" (llm-tool-name (first tools))))
+        (ok (tool-executable-p src "lookup")))
+      (let* ((agent (make-ai-agent :name "host" :backend backend
+                                   :tools (list src)))
+             (run (run-ai-agent agent "go")))
+        (ok (eq :stop (agent-run-finish-reason run)))
+        (ok (equal "symbol-found"
+                   (agent-invocation-result
+                    (first (agent-run-invocations run)))))))))

@@ -17,7 +17,8 @@
                (:file "types")
                (:file "async")
                (:file "protocol")
-               (:file "loop"))
+               (:file "loop")
+               (:file "skill-source"))
   :in-order-to ((test-op (test-op "ai-agent-protocol/tests"))))
 
 (defsystem "ai-agent-protocol/mcp"

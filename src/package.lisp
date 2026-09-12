@@ -110,6 +110,9 @@
    #:list-agent-tools
    #:collect-run-tools
    #:prepare-agent-turns
+   #:skill-tool-source
+   #:make-skill-tool-source
+   #:skill-tool-source-skill
    #:agent-approve-p
    #:tool-executable-p
    #:tool-needs-approval-p
