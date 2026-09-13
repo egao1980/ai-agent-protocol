@@ -102,6 +102,7 @@
    #:agent-run-on-part
    #:agent-run-in-flight-turn
    #:agent-run-session
+   #:agent-run-durability
 
    #:agent-run-handle
    #:agent-run-handle-p
@@ -110,6 +111,9 @@
    #:list-agent-tools
    #:collect-run-tools
    #:prepare-agent-turns
+   #:skill-tool-source
+   #:make-skill-tool-source
+   #:skill-tool-source-skill
    #:agent-approve-p
    #:tool-executable-p
    #:tool-needs-approval-p

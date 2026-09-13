@@ -1,5 +1,5 @@
 (defsystem "ai-agent-protocol"
-  :version "0.2.2"
+  :version "0.3.0"
   :description "Async-first CLOS agent protocol over llm-protocol (CL tools, invocations, approvals)"
   :author "egao1980"
   :license "MIT"
@@ -17,7 +17,8 @@
                (:file "types")
                (:file "async")
                (:file "protocol")
-               (:file "loop"))
+               (:file "loop")
+               (:file "skill-source"))
   :in-order-to ((test-op (test-op "ai-agent-protocol/tests"))))
 
 (defsystem "ai-agent-protocol/mcp"
@@ -54,6 +55,30 @@
   :pathname "src/a2a"
   :components ((:file "package")
                (:file "adapter"))
+  :in-order-to ((test-op (test-op "ai-agent-protocol/tests"))))
+
+(defsystem "ai-agent-protocol/durability"
+  :version "0.3.0"
+  :description "task-protocol journal for ai-agent-protocol (:durability)"
+  :author "egao1980"
+  :license "MIT"
+  :depends-on ("ai-agent-protocol" "task-protocol")
+  :serial t
+  :pathname "src/durability"
+  :components ((:file "package")
+               (:file "protocol"))
+  :in-order-to ((test-op (test-op "ai-agent-protocol/tests"))))
+
+(defsystem "ai-agent-protocol/telemetry"
+  :version "0.1.0"
+  :description "GenAI semconv spans per agent run and tool invocation"
+  :author "egao1980"
+  :license "MIT"
+  :depends-on ("ai-agent-protocol" "telemetry-protocol")
+  :serial t
+  :pathname "src/telemetry"
+  :components ((:file "package")
+               (:file "instrument"))
   :in-order-to ((test-op (test-op "ai-agent-protocol/tests"))))
 
 (defsystem "ai-agent-protocol/tests"
