@@ -1,12 +1,5 @@
 (in-package #:ai-agent-protocol/tests)
 
-(defmacro with-agent-loop (&body body)
-  `(let* ((eb (event-backend-libuv:make-libuv-backend))
-          (el (event-protocol:make-event-loop eb)))
-     (event-protocol:with-event-backend (eb)
-       (event-protocol:with-event-loop-var (el)
-         ,@body))))
-
 (defun %one-shot-tools (calls then-text)
   (let ((fired nil))
     (lambda (backend turns &key &allow-other-keys)

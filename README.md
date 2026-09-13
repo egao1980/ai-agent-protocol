@@ -12,7 +12,7 @@ MCP    ── call  ───┘
                     └── llm-protocol ──► models
 ```
 
-**Core has zero MCP/A2A/AG-UI/task-protocol deps.** Optional systems: `ai-agent-protocol/mcp`, `/ag-ui`, `/a2a`, `/durability`.
+**Core has zero MCP/A2A/AG-UI/task-protocol/telemetry-protocol deps.** Optional systems: `ai-agent-protocol/mcp`, `/ag-ui`, `/a2a`, `/durability`, `/telemetry`.
 
 `on-event` kinds (keywords + llm/agent objects): `:started` `:step` `:part` `:response` `:invocation` `:handoff` `:finished`. `%do-generate` uses `stream-generate` (`:on-part` hops onto the event loop). `run-ai-agent-async` also takes `:on-part`. `ai-agent-protocol/ag-ui` is the streaming encoder to AG-UI events (`*ag-ui-emit*`).
 
@@ -41,7 +41,9 @@ Optional [`conversation-protocol`](https://github.com/egao1980/conversation-prot
 
 Optional [`steer-protocol`](https://github.com/egao1980/steer-protocol) `:steering` — rules / `SKILL.md` skills (not A2A `agent-skill`). Applied after recall; merged into the system turn. `make-skill-tool-source` is a thin tool source that lists `skill-tools` and dispatches `skill-tool-fn` (same shape as `make-mcp-tool-source`).
 
-Optional [`task-protocol`](https://github.com/egao1980/task-protocol) `:durability` (`ai-agent-protocol/durability`) — each `generate` and tool invocation is a `with-durable-step` (idempotency key per step). HITL approve/deny journals `wait-input`; `run-ai-agent` with the same journal replays completed steps and continues. Crashes resume mid-run.
+Optional `task-protocol` `:durability` (`ai-agent-protocol/durability`) — each `generate` and tool invocation is a `with-durable-step` (idempotency key per step). HITL approve/deny journals `wait-input`; `run-ai-agent` with the same journal replays completed steps and continues. Crashes resume mid-run.
+
+`tests/durability-test.lisp` lives in `ai-agent-protocol/durability-tests`, **not** default `test-op` / `:ci :with`. `task-protocol` has no owning GitHub repo and is not on GHCR, so published-repo CI cannot resolve `/durability`. Locally, put a `task-protocol` checkout on `CL_SOURCE_REGISTRY` and run `(asdf:test-system "ai-agent-protocol/durability")`.
 
 ```lisp
 (asdf:load-system "ai-agent-protocol/durability")

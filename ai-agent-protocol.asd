@@ -9,6 +9,7 @@
                (:ci (:with ("ai-agent-protocol/mcp"
                             "ai-agent-protocol/ag-ui"
                             "ai-agent-protocol/a2a"
+                            "ai-agent-protocol/telemetry"
                             "event-backend-libuv"))))
   :serial t
   :pathname "src"
@@ -67,7 +68,7 @@
   :pathname "src/durability"
   :components ((:file "package")
                (:file "protocol"))
-  :in-order-to ((test-op (test-op "ai-agent-protocol/tests"))))
+  :in-order-to ((test-op (test-op "ai-agent-protocol/durability-tests"))))
 
 (defsystem "ai-agent-protocol/telemetry"
   :version "0.1.0"
@@ -86,6 +87,7 @@
                "ai-agent-protocol/mcp"
                "ai-agent-protocol/ag-ui"
                "ai-agent-protocol/a2a"
+               "ai-agent-protocol/telemetry"
                "event-backend-libuv"
                "rove")
   :pathname "tests"
@@ -95,7 +97,25 @@
                (:file "restarts-test")
                (:file "mcp-test")
                (:file "ag-ui-test")
-               (:file "a2a-test"))
+               (:file "a2a-test")
+               (:file "telemetry-test"))
+  :perform (test-op (o c)
+             (unless (symbol-call :rove :run c)
+               (error "tests failed for ~A" (component-name c)))))
+
+;; Optional. Not in default test-op / :ci :with — task-protocol has no
+;; owning GitHub repo and is not on GHCR, so published-repo CI cannot
+;; resolve ai-agent-protocol/durability. Local: checkout task-protocol
+;; onto CL_SOURCE_REGISTRY, then (asdf:test-system "ai-agent-protocol/durability").
+(defsystem "ai-agent-protocol/durability-tests"
+  :depends-on ("ai-agent-protocol"
+               "ai-agent-protocol/durability"
+               "event-backend-libuv"
+               "rove")
+  :pathname "tests"
+  :serial t
+  :components ((:file "package")
+               (:file "durability-test"))
   :perform (test-op (o c)
              (unless (symbol-call :rove :run c)
                (error "tests failed for ~A" (component-name c)))))
