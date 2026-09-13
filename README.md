@@ -12,7 +12,7 @@ MCP    ── call  ───┘
                     └── llm-protocol ──► models
 ```
 
-**Core has zero MCP/A2A/AG-UI deps.** Optional systems: `ai-agent-protocol/mcp`, `/ag-ui`, `/a2a`.
+**Core has zero MCP/A2A/AG-UI/task-protocol deps.** Optional systems: `ai-agent-protocol/mcp`, `/ag-ui`, `/a2a`, `/durability`.
 
 `on-event` kinds (keywords + llm/agent objects): `:started` `:step` `:part` `:response` `:invocation` `:handoff` `:finished`. `%do-generate` uses `stream-generate` (`:on-part` hops onto the event loop). `run-ai-agent-async` also takes `:on-part`. `ai-agent-protocol/ag-ui` is the streaming encoder to AG-UI events (`*ag-ui-emit*`).
 
@@ -40,6 +40,16 @@ CL tools: `function-tool` / `define-agent-tool`. Nested agent in `:tools` = one 
 Optional [`conversation-protocol`](https://github.com/egao1980/conversation-protocol) `:memory` — `prepare-agent-turns` recalls, terminal finish remembers (`:replace t`). Session is `:session` on the agent or `run-ai-agent`. Approval / deferred pauses do not persist.
 
 Optional [`steer-protocol`](https://github.com/egao1980/steer-protocol) `:steering` — rules / `SKILL.md` skills (not A2A `agent-skill`). Applied after recall; merged into the system turn. `make-skill-tool-source` is a thin tool source that lists `skill-tools` and dispatches `skill-tool-fn` (same shape as `make-mcp-tool-source`).
+
+Optional [`task-protocol`](https://github.com/egao1980/task-protocol) `:durability` (`ai-agent-protocol/durability`) — each `generate` and tool invocation is a `with-durable-step` (idempotency key per step). HITL approve/deny journals `wait-input`; `run-ai-agent` with the same journal replays completed steps and continues. Crashes resume mid-run.
+
+```lisp
+(asdf:load-system "ai-agent-protocol/durability")
+(let ((dur (ai-agent-protocol/durability:make-agent-durability
+            :journal (stack-task:make-in-memory-journal)
+            :task-id "run-1")))
+  (run-ai-agent agent "go" :durability dur))
+```
 
 ```lisp
 (make-ai-agent :name "echo" :backend backend

@@ -102,6 +102,7 @@
    #:agent-run-on-part
    #:agent-run-in-flight-turn
    #:agent-run-session
+   #:agent-run-durability
 
    #:agent-run-handle
    #:agent-run-handle-p

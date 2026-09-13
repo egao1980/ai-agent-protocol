@@ -158,18 +158,78 @@ Sync handlers run off the event loop. An AI-AGENT source runs as a subagent.")
   (:method ((run agent-run))
     (cancel-agent-run (agent-run-handle run))))
 
+(defun %durability-symbol (name)
+  (let ((pkg (find-package '#:ai-agent-protocol/durability)))
+    (and pkg (find-symbol name pkg))))
+
+(defun %durability-fn (name)
+  (let ((sym (%durability-symbol name)))
+    (and sym (fboundp sym) sym)))
+
+(defun %coerce-durability (durability)
+  "Soft-load hook: :DURABILITY requires ai-agent-protocol/durability."
+  (cond
+    ((null durability) nil)
+    (t
+     (let ((fn (%durability-fn "COERCE-AGENT-DURABILITY")))
+       (unless fn
+         (error 'agent-error
+                :message "load ai-agent-protocol/durability to use :durability"))
+       (funcall fn durability)))))
+
+(defun %durable-step-replayed (run name &key idempotency-key)
+  (let ((d (and run (agent-run-durability run)))
+        (fn (%durability-fn "DURABLE-STEP-REPLAYED")))
+    (if (and d fn)
+        (funcall fn d name :idempotency-key idempotency-key)
+        (values nil nil))))
+
+(defun %durable-record-step (run name result &key idempotency-key)
+  (let ((d (and run (agent-run-durability run)))
+        (fn (%durability-fn "RECORD-DURABLE-STEP")))
+    (when (and d fn)
+      (funcall fn d name result :idempotency-key idempotency-key))))
+
+(defun %durable-wait-input (run prompt)
+  (let ((d (and run (agent-run-durability run)))
+        (fn (%durability-fn "DURABLE-WAIT-INPUT")))
+    (when (and d fn)
+      (funcall fn d :prompt prompt))))
+
+(defun %durable-hitl-key (invocation)
+  (format nil "hitl/~a" (agent-invocation-id invocation)))
+
+(defun %apply-journaled-hitl (run inv)
+  "If approve/deny was journaled, restore it onto INV."
+  (when (eq (agent-invocation-status inv) :proposed)
+    (multiple-value-bind (hit result)
+        (%durable-step-replayed run "hitl"
+                                :idempotency-key (%durable-hitl-key inv))
+      (when hit
+        (if (eq (getf result :decision) :approved)
+            (setf (agent-invocation-status inv) :approved)
+            (setf (agent-invocation-status inv) :denied
+                  (agent-invocation-result inv)
+                  (or (getf result :reason) "denied")
+                  (agent-invocation-error-p inv) nil))
+        (%emit run :invocation inv)
+        t))))
+
 (defgeneric run-ai-agent-async (agent turns &key settings tools on-event
-                                on-part callback error-callback session)
+                                on-part callback error-callback session
+                                durability)
   (:documentation "Async primitive. CALLBACK gets an AGENT-RUN.
 TOOLS are extra sources for this run (appended). ON-EVENT is (kind payload).
 ON-PART is (lambda (llm-part)) in addition to :part on-event.
 SESSION overrides AI-AGENT-SESSION for recall/remember.
-Returns AGENT-RUN-HANDLE."))
+DURABILITY (optional) is a journal / durable-task / agent-durability —
+requires ai-agent-protocol/durability. Returns AGENT-RUN-HANDLE."))
 
 (defgeneric run-ai-agent (agent turns &key settings tools on-event on-part
-                          session)
+                          session durability)
   (:documentation "Await RUN-AI-AGENT-ASYNC (drives the bound event loop).")
-  (:method ((agent ai-agent) turns &key settings tools on-event on-part session)
+  (:method ((agent ai-agent) turns &key settings tools on-event on-part session
+            durability)
     (let ((timeout (agent-settings-timeout
                     (or (and settings (coerce-agent-settings settings))
                         (ai-agent-settings agent)))))
@@ -178,26 +238,31 @@ Returns AGENT-RUN-HANDLE."))
                                     :settings settings :tools tools
                                     :on-event on-event :on-part on-part
                                     :session session
+                                    :durability durability
                                     :callback ok :error-callback err))
               :timeout timeout))))
 
 (defgeneric resume-ai-agent-async (run &key callback error-callback on-event
-                                  on-part)
+                                  on-part durability)
   (:documentation "Continue a paused AGENT-RUN (after approve/deny/complete)."))
 
-(defgeneric resume-ai-agent (run &key on-event on-part)
+(defgeneric resume-ai-agent (run &key on-event on-part durability)
   (:documentation "Await RESUME-AI-AGENT-ASYNC.")
-  (:method ((run agent-run) &key on-event on-part)
+  (:method ((run agent-run) &key on-event on-part durability)
     (let ((timeout (agent-settings-timeout (agent-run-settings run))))
       (%await (lambda (ok err)
                 (resume-ai-agent-async run :callback ok :error-callback err
-                                       :on-event on-event :on-part on-part))
+                                       :on-event on-event :on-part on-part
+                                       :durability durability))
               :timeout timeout))))
 
 (defun approve-invocation (run invocation &key)
   (setf (agent-invocation-status invocation) :approved)
   (setf (agent-run-pending run)
         (remove invocation (agent-run-pending run)))
+  (%durable-record-step run "hitl"
+                        (list :decision :approved)
+                        :idempotency-key (%durable-hitl-key invocation))
   (%emit run :invocation invocation)
   run)
 
@@ -207,6 +272,9 @@ Returns AGENT-RUN-HANDLE."))
         (agent-invocation-error-p invocation) nil)
   (setf (agent-run-pending run)
         (remove invocation (agent-run-pending run)))
+  (%durable-record-step run "hitl"
+                        (list :decision :denied :reason (or reason "denied"))
+                        :idempotency-key (%durable-hitl-key invocation))
   (%emit run :invocation invocation)
   run)
 

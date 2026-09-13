@@ -180,11 +180,13 @@
    (settings :initarg :settings :accessor agent-run-settings
              :initform (make-agent-settings))
    (session :initarg :session :accessor agent-run-session :initform nil)
-   (memory :initarg :memory :accessor agent-run-memory :initform nil)))
+   (memory :initarg :memory :accessor agent-run-memory :initform nil)
+   (durability :initarg :durability :accessor agent-run-durability :initform nil)))
 
 (defun make-agent-run (&key agent turns invocations pending (step 0)
                          finish-reason last-response handle on-event on-part
-                         in-flight-turn sources extra settings session memory)
+                         in-flight-turn sources extra settings session memory
+                         durability)
   (let* ((h (or handle (make-instance 'agent-run-handle)))
          (run (make-instance 'agent-run
                              :agent agent :turns turns
@@ -196,7 +198,8 @@
                              :sources sources :extra extra
                              :settings (coerce-agent-settings settings)
                              :session session
-                             :memory memory)))
+                             :memory memory
+                             :durability durability)))
     (setf (agent-run-handle-run h) run)
     run))
 

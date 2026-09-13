@@ -1,5 +1,5 @@
 (defsystem "ai-agent-protocol"
-  :version "0.2.2"
+  :version "0.3.0"
   :description "Async-first CLOS agent protocol over llm-protocol (CL tools, invocations, approvals)"
   :author "egao1980"
   :license "MIT"
@@ -9,6 +9,8 @@
                (:ci (:with ("ai-agent-protocol/mcp"
                             "ai-agent-protocol/ag-ui"
                             "ai-agent-protocol/a2a"
+                            "ai-agent-protocol/durability"
+                            "ai-agent-protocol/telemetry"
                             "event-backend-libuv"))))
   :serial t
   :pathname "src"
@@ -57,11 +59,37 @@
                (:file "adapter"))
   :in-order-to ((test-op (test-op "ai-agent-protocol/tests"))))
 
+(defsystem "ai-agent-protocol/durability"
+  :version "0.3.0"
+  :description "task-protocol journal for ai-agent-protocol (:durability)"
+  :author "egao1980"
+  :license "MIT"
+  :depends-on ("ai-agent-protocol" "task-protocol")
+  :serial t
+  :pathname "src/durability"
+  :components ((:file "package")
+               (:file "protocol"))
+  :in-order-to ((test-op (test-op "ai-agent-protocol/tests"))))
+
+(defsystem "ai-agent-protocol/telemetry"
+  :version "0.1.0"
+  :description "GenAI semconv spans per agent run and tool invocation"
+  :author "egao1980"
+  :license "MIT"
+  :depends-on ("ai-agent-protocol" "telemetry-protocol")
+  :serial t
+  :pathname "src/telemetry"
+  :components ((:file "package")
+               (:file "instrument"))
+  :in-order-to ((test-op (test-op "ai-agent-protocol/tests"))))
+
 (defsystem "ai-agent-protocol/tests"
   :depends-on ("ai-agent-protocol"
                "ai-agent-protocol/mcp"
                "ai-agent-protocol/ag-ui"
                "ai-agent-protocol/a2a"
+               "ai-agent-protocol/durability"
+               "ai-agent-protocol/telemetry"
                "event-backend-libuv"
                "rove")
   :pathname "tests"
@@ -71,7 +99,9 @@
                (:file "restarts-test")
                (:file "mcp-test")
                (:file "ag-ui-test")
-               (:file "a2a-test"))
+               (:file "a2a-test")
+               (:file "durability-test")
+               (:file "telemetry-test"))
   :perform (test-op (o c)
              (unless (symbol-call :rove :run c)
                (error "tests failed for ~A" (component-name c)))))

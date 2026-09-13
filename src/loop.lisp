@@ -37,7 +37,54 @@
                                           (%agent-session (agent-run-agent run)))
                              :replace t))))
 
+(defun %part-plist (part)
+  (cond
+    ((llm-text-part-p part)
+     (list :type :text :text (llm-text-part-text part)))
+    ((llm-tool-call-part-p part)
+     (list :type :tool-call
+           :id (llm-tool-call-part-id part)
+           :name (llm-tool-call-part-name part)
+           :arguments (or (llm-tool-call-part-arguments part) "{}")))
+    (t (list :type :unknown))))
+
+(defun %plist-part (plist)
+  (case (getf plist :type)
+    (:text (make-llm-text-part :text (or (getf plist :text) "")))
+    (:tool-call (make-llm-tool-call-part
+                 :id (getf plist :id)
+                 :name (getf plist :name)
+                 :arguments (or (getf plist :arguments) "{}")))
+    (t (make-llm-text-part :text ""))))
+
+(defun %response-plist (response)
+  (list :finish-reason (llm-response-finish-reason response)
+        :model (llm-response-model response)
+        :parts (mapcar #'%part-plist (copy-list (llm-response-parts response)))))
+
+(defun %plist-response (plist)
+  (make-llm-response
+   :finish-reason (or (getf plist :finish-reason) :stop)
+   :model (getf plist :model)
+   :parts (mapcar #'%plist-part (getf plist :parts))))
+
+(defun %generate-step-key (run)
+  (format nil "generate/~d" (agent-run-step run)))
+
+(defun %tool-step-key (inv)
+  (format nil "tool/~a" (agent-invocation-id inv)))
+
 (defun %finish (run reason callback)
+  (when (member reason '(:approval :deferred) :test #'eq)
+    (%durable-wait-input
+     run
+     (list :reason reason
+           :pending (mapcar (lambda (inv)
+                              (list :id (agent-invocation-id inv)
+                                    :name (agent-invocation-name inv)
+                                    :arguments (agent-invocation-arguments inv)
+                                    :status (agent-invocation-status inv)))
+                            (agent-run-pending run)))))
   (setf (agent-run-finish-reason run) reason)
   (when (%terminal-finish-p reason)
     (%remember-run run))
@@ -217,6 +264,7 @@
       (t
        (setf (agent-invocation-status inv) :approved)))
     (%emit-invocation run inv)
+    (%apply-journaled-hitl run inv)
     inv))
 
 (defun %offer-approval (run inv)
@@ -281,49 +329,80 @@
           (dolist (inv invs)
             (setf (agent-invocation-status inv) :running)
             (%emit-invocation run inv)
-            (invoke-tool-async (agent-invocation-source inv)
-                               (agent-invocation-name inv)
-                               (agent-invocation-arguments inv)
-                               :callback (lambda (result)
-                                           (setf (agent-invocation-status inv) :done
-                                                 (agent-invocation-result inv)
-                                                 (if (stringp result)
-                                                     result
-                                                     (princ-to-string result)))
-                                           (%emit-invocation run inv)
-                                           (one-done))
-                               :error-callback (lambda (c)
-                                                 (let ((act
-                                                        (restart-case
-                                                            (progn
-                                                              (signal 'agent-tool-error
-                                                                      :run run
-                                                                      :invocation inv
-                                                                      :cause c
-                                                                      :name (agent-invocation-name inv)
-                                                                      :message (princ-to-string c))
-                                                              :skip)
-                                                          (use-value (result)
-                                                            :report "Use a supplied tool result string"
-                                                            (setf (agent-invocation-status inv) :done
-                                                                  (agent-invocation-error-p inv) nil
-                                                                  (agent-invocation-result inv)
-                                                                  (if (stringp result)
-                                                                      result
-                                                                      (princ-to-string result)))
-                                                            :used)
-                                                          (skip-tool ()
-                                                            :report "Record the tool error and continue"
-                                                            (progn :skip)))))
-                                                   (when (eq act :used)
-                                                     (%emit-invocation run inv))
-                                                   (when (eq act :skip)
-                                                     (setf (agent-invocation-status inv) :error
-                                                           (agent-invocation-error-p inv) t
-                                                           (agent-invocation-result inv)
-                                                           (princ-to-string c))
-                                                     (%emit-invocation run inv))
-                                                   (one-done)))))))))
+            (%invoke-one-tool run inv #'one-done))))))
+
+(defun %apply-tool-plist (run inv plist)
+  (setf (agent-invocation-status inv) (or (getf plist :status) :done)
+        (agent-invocation-result inv) (getf plist :result)
+        (agent-invocation-error-p inv) (getf plist :error-p))
+  (%emit-invocation run inv))
+
+(defun %invoke-one-tool (run inv done)
+  (let ((key (%tool-step-key inv)))
+    (multiple-value-bind (hit plist)
+        (%durable-step-replayed run "tool" :idempotency-key key)
+      (cond
+        (hit
+         (%apply-tool-plist run inv plist)
+         (funcall done))
+        (t
+         (invoke-tool-async (agent-invocation-source inv)
+                            (agent-invocation-name inv)
+                            (agent-invocation-arguments inv)
+                            :callback (lambda (result)
+                                        (let ((plist (list :status :done
+                                                           :result (if (stringp result)
+                                                                       result
+                                                                       (princ-to-string result))
+                                                           :error-p nil)))
+                                          (%durable-record-step run "tool" plist
+                                                                :idempotency-key key)
+                                          (%apply-tool-plist run inv plist)
+                                          (funcall done)))
+                            :error-callback (lambda (c)
+                                              (let ((act
+                                                     (restart-case
+                                                         (progn
+                                                           (signal 'agent-tool-error
+                                                                   :run run
+                                                                   :invocation inv
+                                                                   :cause c
+                                                                   :name (agent-invocation-name inv)
+                                                                   :message (princ-to-string c))
+                                                           :skip)
+                                                       (use-value (result)
+                                                         :report "Use a supplied tool result string"
+                                                         (setf (agent-invocation-status inv) :done
+                                                               (agent-invocation-error-p inv) nil
+                                                               (agent-invocation-result inv)
+                                                               (if (stringp result)
+                                                                   result
+                                                                   (princ-to-string result)))
+                                                         :used)
+                                                       (skip-tool ()
+                                                         :report "Record the tool error and continue"
+                                                         (progn :skip)))))
+                                                (when (eq act :used)
+                                                  (%durable-record-step
+                                                   run "tool"
+                                                   (list :status :done
+                                                         :result (agent-invocation-result inv)
+                                                         :error-p nil)
+                                                   :idempotency-key key)
+                                                  (%emit-invocation run inv))
+                                                (when (eq act :skip)
+                                                  (setf (agent-invocation-status inv) :error
+                                                        (agent-invocation-error-p inv) t
+                                                        (agent-invocation-result inv)
+                                                        (princ-to-string c))
+                                                  (%durable-record-step
+                                                   run "tool"
+                                                   (list :status :error
+                                                         :result (agent-invocation-result inv)
+                                                         :error-p t)
+                                                   :idempotency-key key)
+                                                  (%emit-invocation run inv))
+                                                (funcall done)))))))))
 
 (defun %on-generate (run response callback error-callback)
   (handler-case
@@ -362,61 +441,72 @@
       (funcall error-callback e))))
 
 (defun %do-generate (run callback error-callback)
-  (let ((choice (%tool-choice run)))
-    (multiple-value-bind (eb el) (%event-context)
-      (%off-loop
-       (lambda ()
-         (flet ((emit-part (part)
-                  (let ((p part))
-                    ;; Capture EB/EL — worker has no *event-loop* binding.
-                    (event:wake-call eb el
-                                     (lambda ()
-                                       (%append-in-flight-part run p)
-                                       (%emit run :part p))))))
-           (handler-case
-               (stream-generate (%backend run)
-                                (agent-run-turns run)
-                                :settings (agent-settings-llm (agent-run-settings run))
-                                :tools (collect-run-tools (agent-run-agent run)
-                                                          :extra (agent-run-extra run))
-                                :tool-choice choice
-                                :on-part #'emit-part)
-             (llm-unsupported ()
-               (let ((response (generate (%backend run)
-                                         (agent-run-turns run)
-                                         :settings (agent-settings-llm (agent-run-settings run))
-                                         :tools (collect-run-tools (agent-run-agent run)
-                                                                   :extra (agent-run-extra run))
-                                         :tool-choice choice)))
-                 (dolist (part (llm-response-parts response))
-                   (emit-part part))
-                 response)))))
-     (lambda (response)
-       (%on-generate run response callback error-callback))
-     (lambda (c)
-       (let ((act (restart-case
-                      (progn
-                        (signal 'agent-generate-error
-                                :run run
-                                :step (agent-run-step run)
-                                :cause c
-                                :message (princ-to-string c))
-                        :fail)
-                    (retry ()
-                      :report "Retry GENERATE"
-                      (progn :retry))
-                    (use-value (response)
-                      :report "Use a supplied LLM-RESPONSE"
-                      (%on-generate run response callback error-callback)
-                      :used)
-                    (abort ()
-                      :report "Fail the generate step"
-                      (progn :fail)))))
-         (cond
-           ((eq act :retry)
-            (%do-generate run callback error-callback))
-           ((eq act :fail)
-            (funcall error-callback c)))))))))
+  (let ((key (%generate-step-key run)))
+    (multiple-value-bind (hit plist)
+        (%durable-step-replayed run "generate" :idempotency-key key)
+      (when hit
+        (%on-generate run (%plist-response plist) callback error-callback)
+        (return-from %do-generate)))
+    (let ((choice (%tool-choice run)))
+      (multiple-value-bind (eb el) (%event-context)
+        (%off-loop
+         (lambda ()
+           (flet ((emit-part (part)
+                    (let ((p part))
+                      ;; Capture EB/EL — worker has no *event-loop* binding.
+                      (event:wake-call eb el
+                                       (lambda ()
+                                         (%append-in-flight-part run p)
+                                         (%emit run :part p))))))
+             (handler-case
+                 (stream-generate (%backend run)
+                                  (agent-run-turns run)
+                                  :settings (agent-settings-llm (agent-run-settings run))
+                                  :tools (collect-run-tools (agent-run-agent run)
+                                                            :extra (agent-run-extra run))
+                                  :tool-choice choice
+                                  :on-part #'emit-part)
+               (llm-unsupported ()
+                 (let ((response (generate (%backend run)
+                                           (agent-run-turns run)
+                                           :settings (agent-settings-llm (agent-run-settings run))
+                                           :tools (collect-run-tools (agent-run-agent run)
+                                                                     :extra (agent-run-extra run))
+                                           :tool-choice choice)))
+                   (dolist (part (llm-response-parts response))
+                     (emit-part part))
+                   response)))))
+         (lambda (response)
+           (%durable-record-step run "generate" (%response-plist response)
+                                 :idempotency-key key)
+           (%on-generate run response callback error-callback))
+         (lambda (c)
+           (let ((act (restart-case
+                          (progn
+                            (signal 'agent-generate-error
+                                    :run run
+                                    :step (agent-run-step run)
+                                    :cause c
+                                    :message (princ-to-string c))
+                            :fail)
+                        (retry ()
+                          :report "Retry GENERATE"
+                          (progn :retry))
+                        (use-value (response)
+                          :report "Use a supplied LLM-RESPONSE"
+                          (%durable-record-step run "generate"
+                                                (%response-plist response)
+                                                :idempotency-key key)
+                          (%on-generate run response callback error-callback)
+                          :used)
+                        (abort ()
+                          :report "Fail the generate step"
+                          (progn :fail)))))
+             (cond
+               ((eq act :retry)
+                (%do-generate run callback error-callback))
+               ((eq act :fail)
+                (funcall error-callback c))))))))))
 
 (defun %tick-run (run callback error-callback)
   (when (%check-canceled run callback)
@@ -444,13 +534,14 @@
     (%do-generate run callback error-callback)))
 
 (defmethod run-ai-agent-async ((agent ai-agent) turns &key settings tools on-event
-                               on-part callback error-callback session)
+                               on-part callback error-callback session durability)
   (%event-context)
   (let* ((settings (or (and settings (coerce-agent-settings settings))
                        (coerce-agent-settings (ai-agent-settings agent))))
          (handle (make-instance 'agent-run-handle))
          (extra (copy-list tools))
          (sid (%agent-session agent nil session))
+         (dur (%coerce-durability durability))
          (run (make-agent-run
                :agent agent
                :turns (prepare-agent-turns agent turns
@@ -464,7 +555,8 @@
                                 extra)
                :settings settings
                :session sid
-               :memory (ai-agent-memory agent)))
+               :memory (ai-agent-memory agent)
+               :durability dur))
          (ok (or callback (lambda (v) (declare (ignore v)))))
          (err (or error-callback #'error)))
     (%emit run :started run)
@@ -472,12 +564,14 @@
     handle))
 
 (defmethod resume-ai-agent-async ((run agent-run) &key callback error-callback
-                                  on-event on-part)
+                                  on-event on-part durability)
   (%event-context)
   (when on-event
     (setf (agent-run-on-event run) on-event))
   (when on-part
     (setf (agent-run-on-part run) on-part))
+  (when durability
+    (setf (agent-run-durability run) (%coerce-durability durability)))
   (setf (agent-run-finish-reason run) nil)
   (let ((ok (or callback (lambda (v) (declare (ignore v)))))
         (err (or error-callback #'error))
