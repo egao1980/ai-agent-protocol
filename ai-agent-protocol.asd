@@ -9,8 +9,6 @@
                (:ci (:with ("ai-agent-protocol/mcp"
                             "ai-agent-protocol/ag-ui"
                             "ai-agent-protocol/a2a"
-                            "ai-agent-protocol/durability"
-                            "ai-agent-protocol/telemetry"
                             "event-backend-libuv"))))
   :serial t
   :pathname "src"
@@ -88,8 +86,6 @@
                "ai-agent-protocol/mcp"
                "ai-agent-protocol/ag-ui"
                "ai-agent-protocol/a2a"
-               "ai-agent-protocol/durability"
-               "ai-agent-protocol/telemetry"
                "event-backend-libuv"
                "rove")
   :pathname "tests"
@@ -99,9 +95,7 @@
                (:file "restarts-test")
                (:file "mcp-test")
                (:file "ag-ui-test")
-               (:file "a2a-test")
-               (:file "durability-test")
-               (:file "telemetry-test"))
+               (:file "a2a-test"))
   :perform (test-op (o c)
              (unless (symbol-call :rove :run c)
                (error "tests failed for ~A" (component-name c)))))
