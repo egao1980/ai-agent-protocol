@@ -43,7 +43,7 @@ Optional [`steer-protocol`](https://github.com/egao1980/steer-protocol) `:steeri
 
 Optional `task-protocol` `:durability` (`ai-agent-protocol/durability`) — each `generate` and tool invocation is a `with-durable-step` (idempotency key per step). HITL approve/deny journals `wait-input`; `run-ai-agent` with the same journal replays completed steps and continues. Crashes resume mid-run.
 
-`tests/durability-test.lisp` lives in `ai-agent-protocol/durability-tests`, **not** default `test-op` / `:ci :with`. `task-protocol` has no owning GitHub repo and is not on GHCR, so published-repo CI cannot resolve `/durability`. Locally, put a `task-protocol` checkout on `CL_SOURCE_REGISTRY` and run `(asdf:test-system "ai-agent-protocol/durability")`.
+`tests/durability-test.lisp` runs in default `test-op` / `:ci :with` (`task-protocol` is on GHCR). `(asdf:test-system "ai-agent-protocol")` includes kill-and-replay coverage. The `ai-agent-protocol/durability-tests` system is a thin alias of the same suite.
 
 ```lisp
 (asdf:load-system "ai-agent-protocol/durability")
