@@ -216,7 +216,15 @@ messages), oldest first; injected before the next generate.")
               :documentation "SUBAGENT-TASKs this run started, oldest first.")
    (waiter :accessor agent-run-waiter :initform nil
            :documentation "Thunk that resumes a run waiting for its subagents,
-or NIL. Called on the loop when a report arrives or the run is canceled.")))
+or NIL. Called on the loop when a report arrives or the run is canceled.")
+   (instructions :accessor agent-run-instructions :initform nil
+                 :documentation "This run's STEER:INSTRUCTION-DISCOVERY (a copy of
+the configured one, so what is in context is per run), or NIL.")
+   (instructions-scanned :accessor agent-run-instructions-scanned :initform nil
+                         :documentation "Invocations already scanned for paths.")
+   (instructions-reinject :accessor agent-run-instructions-reinject :initform nil
+                          :documentation "Instruction files to re-inject after a
+compaction dropped them from context.")))
 
 (defvar *subagent-parent* nil
   "Bound to the parent AGENT-RUN while it starts a background subagent;

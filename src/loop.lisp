@@ -579,7 +579,7 @@ blocking it); otherwise fail the run."
        (%maybe-compact run
                        (lambda (did)
                          (if did
-                             (%do-generate run callback error-callback)
+                             (%generate-with-instructions run callback error-callback)
                              (funcall error-callback c)))
                        error-callback
                        :force t))
@@ -645,6 +645,7 @@ compacted. Counting and summarizing run off the loop."
                (when did
                  (setf (agent-run-turns run) (first result)
                        (agent-run-usage-anchor run) nil)
+                 (%instructions-compacted run)
                  (%emit run :compacted (list :before (length turns)
                                              :after (length (first result)))))
                (funcall next did)))
@@ -659,6 +660,8 @@ turns it off), then finish :max-steps."
       (%finish run :max-steps callback)
       (progn
         (%drain-inbox run)
+        (unless (%inject-instructions-or-fail run error-callback)
+          (return-from %wrap-up-or-finish))
         (setf (agent-run-wrap-up-p run) t
               (agent-run-turns run)
               (append (agent-run-turns run)
@@ -695,8 +698,21 @@ turns it off), then finish :max-steps."
     (%maybe-compact run
                     (lambda (did)
                       (declare (ignore did))
-                      (%do-generate run callback error-callback))
+                      (%generate-with-instructions run callback error-callback))
                     error-callback)))
+
+(defun %inject-instructions-or-fail (run error-callback)
+  "Inject discovered instructions. T to go on; a steer error fails the run
+through ERROR-CALLBACK → NIL. (STEER-INSTRUCTION-UNREADABLE offers CONTINUE /
+USE-VALUE to a handler bound around the loop.)"
+  (handler-case (progn (%inject-instructions run) t)
+    (steer:steer-error (e)
+      (funcall error-callback e)
+      nil)))
+
+(defun %generate-with-instructions (run callback error-callback)
+  (when (%inject-instructions-or-fail run error-callback)
+    (%do-generate run callback error-callback)))
 
 (defmethod run-ai-agent-async ((agent ai-agent) turns &key settings tools on-event
                                on-part callback error-callback session durability)
@@ -729,6 +745,7 @@ turns it off), then finish :max-steps."
                 (%cancel-subagents run)
                 (funcall err0 c))))
     (setf (agent-run-parent run) *subagent-parent*)
+    (%init-run-instructions run)
     (%emit run :started run)
     (%call-on-loop (lambda () (%tick-run run ok err)))
     handle))

@@ -1,6 +1,6 @@
 # ai-agent-protocol
 
-Version **0.5.0**.
+Version **0.6.0**.
 
 Async-first CLOS **agent loop** over [`llm-protocol`](https://github.com/egao1980/llm-protocol). Not blackboard core. Not AG-UI `run-agent` — that's `ag-ui-protocol:run-agent`. Use `run-ai-agent` / `run-ai-agent-async`.
 
@@ -103,6 +103,25 @@ Modelled on [opencode v2 permissions](https://opencode.ai/v2/permissions.md). A 
 ```
 
 Not done: opencode's "always" replies (saved project rules) and "a rejection rejects every pending request".
+
+### Path-scoped instructions, found as the agent reaches them
+
+With steer-protocol **0.3**, `AGENTS.md` files are loaded when a tool call first touches a path below them, instead of all at once up front:
+
+```lisp
+(make-ai-agent :name "coder" :backend b :tools tools
+               :settings (make-agent-settings
+                          :extra (list :instructions-discovery #p"/work/proj/")))
+;; or :extra (list :instructions-discovery '(:root #p"/work/proj/" :include-claude t))
+;; or :steering (stack-steer:make-instruction-discovery #p"/work/proj/")
+```
+
+- Before each generate the loop takes the finished invocations' paths (`tool-instruction-paths`), asks the run's discovery for instruction files not yet in context (`steer:discover-instructions`, from the file's directory up to the root), and appends them as one turn (`agent-instructions-turn`, default a user turn of `<instructions path=… scope=…>` blocks). The loop emits `:instructions` with the directives.
+- `tool-instruction-paths` (GF) defaults to the `tool-permission-resources` that look like paths, plus string values of `*instruction-path-keys*` (`path`, `file_path`, `paths`, …) in the JSON arguments. Specialize it for a tool source that names paths differently.
+- Each run uses its own copy (`steer:copy-instruction-discovery`, see `agent-run-instructions`). Each file goes in once per run, and again if its content hash changes.
+- After a `:compacted` event the run forgets what it injected and puts those files back in before the next generate.
+- `:instructions-discovery` is a discovery, a root path, a plist for `steer:coerce-instruction-discovery`, or `t` for the current directory. `nil` turns it off, even when `:steering` is a discovery.
+- A steer error during discovery (`steer-instruction-unreadable`) fails the run through its error callback.
 
 ### Background subagents
 

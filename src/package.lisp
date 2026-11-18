@@ -71,6 +71,10 @@
    #:agent-run-post
    #:agent-run-inbox
    #:agent-run-subagents
+   #:agent-run-instructions
+   #:tool-instruction-paths
+   #:*instruction-path-keys*
+   #:agent-instructions-turn
    #:agent-run-parent
    #:+max-steps-prompt+
    #:agent-generate-error
