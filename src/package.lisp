@@ -26,6 +26,52 @@
    #:tool-timeout
    #:tool-failure-kind
    #:tool-failure-text
+   #:tool-permission-denied
+   #:tool-permission-denied-action
+   #:tool-permission-denied-resources
+   #:tool-permission-denied-feedback
+   #:tool-permission-denied-rule
+   #:tool-permission-denied-decision
+
+   #:permission-effect
+   #:permission-rule
+   #:make-permission-rule
+   #:permission-rule-p
+   #:permission-rule-action
+   #:permission-rule-resource
+   #:permission-rule-effect
+   #:permission-rule-feedback
+   #:coerce-permission-rule
+   #:coerce-permission-rules
+   #:permission-glob-match-p
+   #:permission-rule-matches-p
+   #:permission-rules-effect
+   #:tool-permission-resources
+   #:*permission-policy*
+   #:permission-policy-effect
+   #:agent-permission
+
+   #:subagent-tool
+   #:make-subagent-tool
+   #:subagent-tool-p
+   #:subagent-tool-agents
+   #:+subagent-tool-description+
+   #:subagent-task
+   #:subagent-task-id
+   #:subagent-task-name
+   #:subagent-task-agent
+   #:subagent-task-parent
+   #:subagent-task-run
+   #:subagent-task-status
+   #:subagent-task-result
+   #:find-subagent-task
+   #:start-subagent
+   #:continue-subagent
+   #:continue-ai-agent-async
+   #:agent-run-post
+   #:agent-run-inbox
+   #:agent-run-subagents
+   #:agent-run-parent
    #:+max-steps-prompt+
    #:agent-generate-error
    #:agent-generate-error-step
@@ -59,6 +105,7 @@
    #:ai-agent-memory
    #:ai-agent-session
    #:ai-agent-steering
+   #:ai-agent-permissions
    #:register-agent-handoff
    #:unregister-agent-handoff
    #:defagent
@@ -78,6 +125,7 @@
    #:function-tool-handler
    #:function-tool-approval-required-p
    #:function-tool-async-p
+   #:function-tool-permission-resources
    #:register-agent-tool
    #:unregister-agent-tool
    #:find-agent-tool
