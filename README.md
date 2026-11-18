@@ -1,5 +1,7 @@
 # ai-agent-protocol
 
+Version **0.5.0**.
+
 Async-first CLOS **agent loop** over [`llm-protocol`](https://github.com/egao1980/llm-protocol). Not blackboard core. Not AG-UI `run-agent` — that's `ag-ui-protocol:run-agent`. Use `run-ai-agent` / `run-ai-agent-async`.
 
 ```
@@ -14,7 +16,7 @@ MCP    ── call  ───┘
 
 **Core has zero MCP/A2A/AG-UI/task-protocol/telemetry-protocol deps.** Optional systems: `ai-agent-protocol/mcp`, `/ag-ui`, `/a2a`, `/durability`, `/telemetry`.
 
-`on-event` kinds (keywords + llm/agent objects): `:started` `:step` `:part` `:response` `:invocation` `:handoff` `:finished`. `%do-generate` uses `stream-generate` (`:on-part` hops onto the event loop). `run-ai-agent-async` also takes `:on-part`. `ai-agent-protocol/ag-ui` is the streaming encoder to AG-UI events (`*ag-ui-emit*`).
+`on-event` kinds (keywords + llm/agent objects): `:started` `:step` `:part` `:response` `:invocation` `:handoff` `:finished`, plus `:retry` `:compacted` `:wrap-up` `:permission` `:subagent` `:waiting` `:inbox`. `%do-generate` uses `stream-generate` (`:on-part` hops onto the event loop). `run-ai-agent-async` also takes `:on-part`. `ai-agent-protocol/ag-ui` is the streaming encoder to AG-UI events (`*ag-ui-emit*`).
 
 Primitive = callback + cancel token (http `send-async` shape). No Blackbird in the protocol. Sync `run-ai-agent` awaits on the bound `event-protocol` loop. Sync `generate` / tool handlers run **off-loop** so they must not nest `event:run`.
 
@@ -79,6 +81,49 @@ Settings `:extra` keys (plist) steer the loop; all are optional.
                                                     :backend backend :tail-tokens 15000)
                                        :retry-policy (stack-llm:make-retry-policy :max-attempts 6))))
 ```
+
+### Permissions: rules, last match wins
+
+Modelled on [opencode v2 permissions](https://opencode.ai/v2/permissions.md). A `permission-rule` is `{action, resource, effect}`: `action` globs the tool name, `resource` globs one string the call touches, `effect` is `:allow`, `:deny` or `:ask`. Globs are whole-value: `*` is any run (including `/`), `?` one character, backslashes count as slashes, and a pattern ending in ` *` also matches the bare command (`"git status *"` matches `git status`).
+
+- **Resources.** `tool-permission-resources (source name arguments &key context)` lists the strings a call touches (paths, commands). Default `("*")`. Specialize it for a source, or give `make-function-tool` `:permission-resources (lambda (arguments) …)`. `subagent-tool` reports the agent name.
+- **Layers, last match wins.** `make-ai-agent :permissions` (agent layer), then settings `:extra :permissions` (run layer). Rules may be objects (`make-permission-rule action resource effect :feedback text`) or lists `("bash" "git *" :allow)`. For each resource the last matching rule decides; across resources a deny wins, then an ask. No rule decides → the tool's own default (`tool-needs-approval-p` → `:ask`, else `:allow`).
+- **Policy tightens only.** Settings `:extra :permission-policy` and the global `*permission-policy*` (a rule list, or `(lambda (action resources effect))`) may turn allow into ask or deny, and ask into deny; an `:allow` from a policy changes nothing. `permission-policy-effect` is the GF to specialize for other policy objects.
+- **Wiring.** `agent-permission` → `(values effect rule resources)`. `agent-approve-p`'s default is now "effect is `:ask`", so `:ask` is the existing approval pause (`agent-approval-required`, `approve-invocation` / `deny-invocation`, `resume-ai-agent`).
+- **Deny is a tool result, not an abort.** A denied call is not run; its invocation is `:denied` with `error-p` and a `tool-permission-denied` (`tool-failure` subtype, kind `:denied`) text: what was refused, the rule's `:feedback`, "do not repeat the same call". Rejecting an ask with feedback does the same: `(deny-invocation run inv :feedback "Use src/ instead")` or `(invoke-deny condition "…")` from a handler. Without feedback a rejection keeps the old `"denied"` result. Event `:permission` `(:invocation inv :condition c)`.
+
+```lisp
+(make-ai-agent :name "coder" :backend backend
+               :permissions (list '("*" "*" :ask)
+                                  '("bash" "git *" :allow)
+                                  (make-permission-rule "edit" "secrets/*" :deny
+                                                        :feedback "Never edit secrets."))
+               :settings (make-agent-settings
+                          :extra (list :permission-policy '(("bash" "rm *" :deny)))))
+```
+
+Not done: opencode's "always" replies (saved project rules) and "a rejection rejects every pending request".
+
+### Background subagents
+
+`make-subagent-tool (agents &key name description)` gives the model a `subagent` tool (`{"agent", "prompt"}` to start, `{"id", "prompt"}` to continue). Arguments are JSON, so load a `json-protocol` backend (e.g. `json-backend-jzon`).
+
+- The call returns at once with an id (`sub-1`, …); the child runs beside the parent on the same event loop. The tool description tells the model not to poll: the result arrives in its inbox.
+- When the child finishes, its last reply is queued in the parent's inbox (`agent-run-post`) and injected before the parent's next generate as a user turn `<subagent id="sub-1" name="helper">text</subagent>` (`status="failed"` / `"paused"` when it failed or waits for approval).
+- Continue by id: a busy child gets the message in its own inbox, an idle one continues its history (`continue-ai-agent-async`). `find-subagent-task`, `continue-subagent`, `subagent-task-status` (`:running` `:idle` `:paused` `:failed` `:canceled`) are the Lisp API.
+- One level only: a run started as a subagent (`agent-run-parent`) gets `tool-unavailable` if it tries to start one.
+- A parent that ends its turn with live children waits (event `:waiting`) and takes another step when a report lands. Settings `:extra :subagents-on-finish` — `:wait` (default), `:cancel` (cancel them and finish), `:detach` (finish; later reports stay queued).
+- `cancel-agent-run` on the parent cancels its children; a waiting parent finishes `:canceled`. A parent that fails cancels them too.
+- Permission rules apply: `("subagent" "reviewer" :deny)` blocks one agent.
+
+```lisp
+(let ((researcher (make-ai-agent :name "researcher" :backend backend
+                                 :instructions "Find sources for a claim.")))
+  (make-ai-agent :name "lead" :backend backend
+                 :tools (list (make-subagent-tool (list researcher)))))
+```
+
+Approval and inbox state is in memory: durability does not journal subagents yet.
 
 MCP sampling (`create-message` → `generate`) is `ai-agent-protocol/mcp:make-mcp-sampling-handler` — **not** in `llm-protocol`.
 

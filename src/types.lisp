@@ -31,16 +31,22 @@
                         :accessor function-tool-approval-required-p
                         :initform nil)
    (async-p :initarg :async-p :accessor function-tool-async-p :initform nil
-            :documentation "When T, HANDLER is (args callback error-callback).")))
+            :documentation "When T, HANDLER is (args callback error-callback).")
+   (permission-resources :initarg :permission-resources
+                         :accessor function-tool-permission-resources
+                         :initform nil
+                         :documentation "NIL or (lambda (arguments)) → list of
+resource strings (paths, commands) the permission rules match against.")))
 
 (defun make-function-tool (&key name description parameters handler
-                             approval-required-p async-p)
+                             approval-required-p async-p permission-resources)
   (check-type name string)
   (make-instance 'function-tool
                  :name name :description description :parameters parameters
                  :handler handler
                  :approval-required-p approval-required-p
-                 :async-p async-p))
+                 :async-p async-p
+                 :permission-resources permission-resources))
 
 (defun function-tool-p (x)
   (typep x 'function-tool))
@@ -55,10 +61,14 @@
              :initform (make-agent-settings))
    (memory :initarg :memory :accessor ai-agent-memory :initform nil)
    (session :initarg :session :accessor ai-agent-session :initform nil)
-   (steering :initarg :steering :accessor ai-agent-steering :initform nil)))
+   (steering :initarg :steering :accessor ai-agent-steering :initform nil)
+   (permissions :initarg :permissions :accessor ai-agent-permissions
+                :initform nil
+                :documentation "Ordered PERMISSION-RULEs (agent layer). Run
+settings extra :permissions are appended after them; the last match wins.")))
 
 (defun make-ai-agent (&key (name "agent") backend instructions tools handoffs settings
-                        memory session steering)
+                        memory session steering permissions)
   (make-instance 'ai-agent
                  :name name
                  :backend (or backend llm-protocol:*llm-backend*)
@@ -68,12 +78,15 @@
                  :settings (coerce-agent-settings settings)
                  :memory memory
                  :session session
-                 :steering (and steering (steer:coerce-steering steering))))
+                 :steering (and steering (steer:coerce-steering steering))
+                 :permissions permissions))
 
 (defun ai-agent-p (x)
   (typep x 'ai-agent))
 
 (defmethod initialize-instance :after ((agent ai-agent) &key)
+  (setf (ai-agent-permissions agent)
+        (coerce-permission-rules (ai-agent-permissions agent)))
   (when (ai-agent-steering agent)
     (setf (ai-agent-steering agent)
           (steer:coerce-steering (ai-agent-steering agent)))))
@@ -190,7 +203,24 @@
    (compacted-step :accessor agent-run-compacted-step :initform nil
                    :documentation "Step that already compacted on overflow.")
    (wrap-up-p :accessor agent-run-wrap-up-p :initform nil
-              :documentation "T during the tool-less generate after max steps.")))
+              :documentation "T during the tool-less generate after max steps.")
+   (parent :initarg :parent :accessor agent-run-parent :initform nil
+           :documentation "The AGENT-RUN that started this one as a background
+subagent, or NIL.")
+   (inbox :accessor agent-run-inbox :initform nil
+          :documentation "Turns queued for this run (subagent reports, follow-up
+messages), oldest first; injected before the next generate.")
+   (inbox-lock :reader agent-run-inbox-lock
+               :initform (bt:make-lock "ai-agent-inbox"))
+   (subagents :accessor agent-run-subagents :initform nil
+              :documentation "SUBAGENT-TASKs this run started, oldest first.")
+   (waiter :accessor agent-run-waiter :initform nil
+           :documentation "Thunk that resumes a run waiting for its subagents,
+or NIL. Called on the loop when a report arrives or the run is canceled.")))
+
+(defvar *subagent-parent* nil
+  "Bound to the parent AGENT-RUN while it starts a background subagent;
+RUN-AI-AGENT-ASYNC records it as the new run's AGENT-RUN-PARENT.")
 
 (defun make-agent-run (&key agent turns invocations pending (step 0)
                          finish-reason last-response handle on-event on-part

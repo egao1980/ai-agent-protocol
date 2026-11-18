@@ -53,9 +53,10 @@ to inject instructions or rewrite history. Bound MEMORY recalls first.")
 
 (defgeneric agent-approve-p (agent source name arguments &key context)
   (:documentation "T when AGENT wants HITL before SOURCE runs NAME.
-Default defers to TOOL-NEEDS-APPROVAL-P on the source.")
+Default: AGENT-PERMISSION is :ASK (permission rules, else
+TOOL-NEEDS-APPROVAL-P on the source).")
   (:method ((agent ai-agent) source name arguments &key context)
-    (tool-needs-approval-p source name arguments :context context)))
+    (eq :ask (agent-permission agent source name arguments :context context))))
 
 (defgeneric tool-executable-p (source name &key context)
   (:documentation "T when SOURCE can execute NAME (has a handler).")
@@ -151,9 +152,14 @@ Sync handlers run off the event loop. An AI-AGENT source runs as a subagent.")
                                  :error-callback err)))))
 
 (defgeneric cancel-agent-run (handle)
-  (:documentation "Cancel an in-flight RUN-AI-AGENT-ASYNC handle.")
+  (:documentation "Cancel an in-flight RUN-AI-AGENT-ASYNC handle. Background
+subagents the run started are canceled too; a run waiting for them finishes
+as :canceled.")
   (:method ((handle agent-run-handle))
     (setf (agent-run-handle-canceled-p handle) t)
+    (let ((run (agent-run-handle-run handle)))
+      (when run
+        (%cancel-subagents run)))
     handle)
   (:method ((run agent-run))
     (cancel-agent-run (agent-run-handle run))))
@@ -211,7 +217,7 @@ Sync handlers run off the event loop. An AI-AGENT source runs as a subagent.")
             (setf (agent-invocation-status inv) :denied
                   (agent-invocation-result inv)
                   (or (getf result :reason) "denied")
-                  (agent-invocation-error-p inv) nil))
+                  (agent-invocation-error-p inv) (getf result :error-p)))
         (%emit run :invocation inv)
         t))))
 
@@ -266,14 +272,21 @@ requires ai-agent-protocol/durability. Returns AGENT-RUN-HANDLE."))
   (%emit run :invocation invocation)
   run)
 
-(defun deny-invocation (run invocation &key reason)
-  (setf (agent-invocation-status invocation) :denied
-        (agent-invocation-result invocation) (or reason "denied")
-        (agent-invocation-error-p invocation) nil)
+(defun deny-invocation (run invocation &key reason feedback)
+  "Reject a :proposed INVOCATION. With FEEDBACK the model gets a
+TOOL-PERMISSION-DENIED error result carrying it (what to do instead);
+otherwise the result is REASON (default \"denied\")."
+  (if feedback
+      (%refuse-invocation nil invocation (%rejection invocation feedback))
+      (setf (agent-invocation-status invocation) :denied
+            (agent-invocation-result invocation) (or reason "denied")
+            (agent-invocation-error-p invocation) nil))
   (setf (agent-run-pending run)
         (remove invocation (agent-run-pending run)))
   (%durable-record-step run "hitl"
-                        (list :decision :denied :reason (or reason "denied"))
+                        (list :decision :denied
+                              :reason (agent-invocation-result invocation)
+                              :error-p (agent-invocation-error-p invocation))
                         :idempotency-key (%durable-hitl-key invocation))
   (%emit run :invocation invocation)
   run)
@@ -305,7 +318,7 @@ requires ai-agent-protocol/durability. Returns AGENT-RUN-HANDLE."))
 (defmacro defagent (name superclasses &body body)
   "Define an AI-AGENT subclass. Options: (:name \"x\") (:instructions \"…\")
    (:settings form) (:tools form) (:handoffs form) (:memory form) (:session form)
-   (:steering form).
+   (:steering form) (:permissions form).
    Slot forms like DEFCLASS.
    (defagent researcher ()
      \"Looks things up.\"
@@ -326,7 +339,8 @@ requires ai-agent-protocol/durability. Returns AGENT-RUN-HANDLE."))
           (:handoffs (setf initargs (list* :handoffs (second opt) initargs)))
           (:memory (setf initargs (list* :memory (second opt) initargs)))
           (:session (setf initargs (list* :session (second opt) initargs)))
-          (:steering (setf initargs (list* :steering (second opt) initargs)))))
+          (:steering (setf initargs (list* :steering (second opt) initargs)))
+          (:permissions (setf initargs (list* :permissions (second opt) initargs)))))
       `(progn
          (defclass ,name ,supers
            ,slots

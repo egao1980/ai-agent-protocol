@@ -91,13 +91,37 @@ advice TOOL-FAILURE-TEXT puts in the tool result.")
 (define-condition tool-timeout (tool-failure) ()
   (:documentation "The tool ran out of time; a smaller request may work."))
 
+(define-condition tool-permission-denied (tool-failure)
+  ((action :initarg :action :reader tool-permission-denied-action :initform nil)
+   (resources :initarg :resources :reader tool-permission-denied-resources
+              :initform nil)
+   (feedback :initarg :feedback :reader tool-permission-denied-feedback
+             :initform nil
+             :documentation "Text from the rule or the user saying what to do
+instead; NIL when none was given.")
+   (rule :initarg :rule :reader tool-permission-denied-rule :initform nil)
+   (decision :initarg :decision :reader tool-permission-denied-decision
+             :initform :deny
+             :documentation ":DENY (a rule or policy) or :REJECTED (an ask
+the user turned down)."))
+  (:documentation "The call was not run: a permission rule denied it, or the
+user rejected the approval request. Becomes a tool result, not a run abort.")
+  (:report (lambda (c s)
+             (format s "~:[permission denied~;the user rejected the request~]~@[ for ~{~a~^, ~}~]~@[~%Feedback: ~a~]"
+                     (eq (tool-permission-denied-decision c) :rejected)
+                     (remove "*" (tool-permission-denied-resources c)
+                             :test #'equal)
+                     (tool-permission-denied-feedback c)))))
+
 (defgeneric tool-failure-kind (condition)
-  (:documentation "→ :INPUT, :UNAVAILABLE, :TIMEOUT or :EXECUTION for CONDITION,
-the error a tool handler signalled. Specialize for a source's own errors.")
+  (:documentation "→ :INPUT, :UNAVAILABLE, :TIMEOUT, :DENIED or :EXECUTION for
+CONDITION, the error a tool handler signalled. Specialize for a source's own
+errors.")
   (:method ((condition condition)) :execution)
   (:method ((condition tool-input-error)) :input)
   (:method ((condition tool-unavailable)) :unavailable)
-  (:method ((condition tool-timeout)) :timeout))
+  (:method ((condition tool-timeout)) :timeout)
+  (:method ((condition tool-permission-denied)) :denied))
 
 (defgeneric tool-failure-text (condition name)
   (:documentation "Tool result text the model sees when tool NAME failed with
@@ -114,6 +138,9 @@ CONDITION: what went wrong plus what to do next, by TOOL-FAILURE-KIND.")
         (:timeout
          (format nil "Tool ~a timed out: ~a~%Retry with a smaller request, or continue another way."
                  name msg))
+        (:denied
+         (format nil "Tool ~a was not run: ~a~%Do not repeat the same call. ~:[Continue another way, or ask the user for permission.~;Follow the feedback above and continue.~]"
+                 name msg (tool-permission-denied-feedback condition)))
         (:execution
          (format nil "Tool ~a failed: ~a" name msg))))))
 
@@ -155,9 +182,14 @@ CONDITION: what went wrong plus what to do next, by TOOL-FAILURE-KIND.")
   (let ((r (find-restart 'approve condition)))
     (when r (invoke-restart r))))
 
-(defun invoke-deny (&optional condition)
+(defun invoke-deny (&optional condition feedback)
+  "Invoke DENY. With FEEDBACK the model gets a TOOL-PERMISSION-DENIED result
+carrying that text (what to do instead)."
   (let ((r (find-restart 'deny condition)))
-    (when r (invoke-restart r))))
+    (when r
+      (if feedback
+          (invoke-restart r feedback)
+          (invoke-restart r)))))
 
 (defun invoke-pause-for-approval (&optional condition)
   (let ((r (find-restart 'pause-for-approval condition)))

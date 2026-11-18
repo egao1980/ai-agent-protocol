@@ -278,9 +278,11 @@
            (setf (agent-invocation-status inv) :error
                  (agent-invocation-error-p inv) t
                  (agent-invocation-result inv) (%unknown-tool-text run name)))))
+      ((%permission-denied-p run inv source))
       ((not (tool-executable-p source name))
        (setf (agent-invocation-status inv) :deferred))
-      ((agent-approve-p (agent-run-agent run) source name args)
+      ((agent-approve-p (agent-run-agent run) source name args
+                        :context (%permission-context run))
        (setf (agent-invocation-status inv) :proposed))
       (t
        (setf (agent-invocation-status inv) :approved)))
@@ -296,11 +298,18 @@
         :report "Approve the tool invocation"
         (setf (agent-invocation-status inv) :approved)
         (%emit-invocation run inv))
-      (deny ()
+      (deny (&optional feedback)
         :report "Deny the tool invocation"
-        (setf (agent-invocation-status inv) :denied
-              (agent-invocation-result inv) "denied"
-              (agent-invocation-error-p inv) nil)
+        :interactive (lambda ()
+                       (format *query-io* "Feedback for the model (empty for none): ")
+                       (force-output *query-io*)
+                       (let ((line (read-line *query-io*)))
+                         (and (plusp (length line)) (list line))))
+        (if feedback
+            (%refuse-invocation run inv (%rejection inv feedback))
+            (setf (agent-invocation-status inv) :denied
+                  (agent-invocation-result inv) "denied"
+                  (agent-invocation-error-p inv) nil))
         (%emit-invocation run inv))
       (pause-for-approval ()
         :report "Pause the run for HITL approval"
@@ -370,6 +379,7 @@
          (invoke-tool-async (agent-invocation-source inv)
                             (agent-invocation-name inv)
                             (agent-invocation-arguments inv)
+                            :context (list :run run :invocation inv)
                             :callback (lambda (result)
                                         (let ((plist (list :status :done
                                                            :result (if (stringp result)
@@ -443,7 +453,8 @@
               (reason (llm-response-finish-reason response)))
           (cond
             ((null calls)
-             (%finish run (or reason :stop) callback))
+             (%finish-or-await-subagents run (or reason :stop)
+                                         callback error-callback))
             (t
              (let ((invs (mapcar (lambda (c) (%classify run c)) calls)))
                (setf (agent-run-invocations run)
@@ -647,6 +658,7 @@ turns it off), then finish :max-steps."
           (not (%extra run :max-steps-wrap-up t)))
       (%finish run :max-steps callback)
       (progn
+        (%drain-inbox run)
         (setf (agent-run-wrap-up-p run) t
               (agent-run-turns run)
               (append (agent-run-turns run)
@@ -679,6 +691,7 @@ turns it off), then finish :max-steps."
             (%wrap-up-or-finish run callback error-callback)))))
     (incf (agent-run-step run))
     (%emit run :step (agent-run-step run))
+    (%drain-inbox run)
     (%maybe-compact run
                     (lambda (did)
                       (declare (ignore did))
@@ -710,7 +723,12 @@ turns it off), then finish :max-steps."
                :memory (ai-agent-memory agent)
                :durability dur))
          (ok (or callback (lambda (v) (declare (ignore v)))))
-         (err (or error-callback #'error)))
+         (err0 (or error-callback #'error))
+         (err (lambda (c)
+                ;; A failed run takes its background subagents with it.
+                (%cancel-subagents run)
+                (funcall err0 c))))
+    (setf (agent-run-parent run) *subagent-parent*)
     (%emit run :started run)
     (%call-on-loop (lambda () (%tick-run run ok err)))
     handle))
