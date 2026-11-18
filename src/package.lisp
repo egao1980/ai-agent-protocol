@@ -19,6 +19,14 @@
    #:agent-tool-error-invocation
    #:agent-tool-error-cause
    #:agent-tool-error-name
+   #:tool-failure
+   #:tool-failure-message
+   #:tool-input-error
+   #:tool-unavailable
+   #:tool-timeout
+   #:tool-failure-kind
+   #:tool-failure-text
+   #:+max-steps-prompt+
    #:agent-generate-error
    #:agent-generate-error-step
    #:agent-generate-error-cause

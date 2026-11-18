@@ -71,6 +71,52 @@
                            (agent-approval-required-invocation c)))
                      (agent-error-message c)))))
 
+;;; --- typed tool failures --------------------------------------------------
+;;; A tool handler signals one of these so the model gets a result it can act
+;;; on ("fix the arguments" vs "do not call it again"), not a bare error string.
+
+(define-condition tool-failure (error)
+  ((message :initarg :message :reader tool-failure-message :initform nil))
+  (:documentation "A tool failure the model can act on. Subtypes choose the
+advice TOOL-FAILURE-TEXT puts in the tool result.")
+  (:report (lambda (c s)
+             (format s "~a" (or (tool-failure-message c) "tool failed")))))
+
+(define-condition tool-input-error (tool-failure) ()
+  (:documentation "The arguments are wrong: the model should fix them and retry."))
+
+(define-condition tool-unavailable (tool-failure) ()
+  (:documentation "The tool cannot run in this run (missing service, no access)."))
+
+(define-condition tool-timeout (tool-failure) ()
+  (:documentation "The tool ran out of time; a smaller request may work."))
+
+(defgeneric tool-failure-kind (condition)
+  (:documentation "→ :INPUT, :UNAVAILABLE, :TIMEOUT or :EXECUTION for CONDITION,
+the error a tool handler signalled. Specialize for a source's own errors.")
+  (:method ((condition condition)) :execution)
+  (:method ((condition tool-input-error)) :input)
+  (:method ((condition tool-unavailable)) :unavailable)
+  (:method ((condition tool-timeout)) :timeout))
+
+(defgeneric tool-failure-text (condition name)
+  (:documentation "Tool result text the model sees when tool NAME failed with
+CONDITION: what went wrong plus what to do next, by TOOL-FAILURE-KIND.")
+  (:method ((condition condition) name)
+    (let ((msg (princ-to-string condition)))
+      (ecase (tool-failure-kind condition)
+        (:input
+         (format nil "Tool ~a rejected its arguments: ~a~%Fix the arguments to match the tool's input schema and call it again."
+                 name msg))
+        (:unavailable
+         (format nil "Tool ~a is unavailable: ~a~%Do not call it again in this run; continue another way."
+                 name msg))
+        (:timeout
+         (format nil "Tool ~a timed out: ~a~%Retry with a smaller request, or continue another way."
+                 name msg))
+        (:execution
+         (format nil "Tool ~a failed: ~a" name msg))))))
+
 ;;; --- restart helpers -------------------------------------------------------
 
 (defun call-with-agent-restarts (thunk)

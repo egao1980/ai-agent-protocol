@@ -1,10 +1,10 @@
 (defsystem "ai-agent-protocol"
-  :version "0.3.1"
+  :version "0.4.0"
   :description "Async-first CLOS agent protocol over llm-protocol (CL tools, invocations, approvals)"
   :author "egao1980"
   :license "MIT"
-  :depends-on ("llm-protocol" "event-protocol" "bordeaux-threads"
-               "conversation-protocol" "steer-protocol")
+  :depends-on ((:version "llm-protocol" "0.4.0") "event-protocol" "bordeaux-threads"
+               (:version "conversation-protocol" "0.3.0") "steer-protocol")
   :properties (:cl-repo
                (:ci (:with ("ai-agent-protocol/mcp"
                             "ai-agent-protocol/ag-ui"
@@ -91,6 +91,7 @@
                "ai-agent-protocol/durability"
                "ai-agent-protocol/telemetry"
                "task-protocol"
+               "conversation-protocol/summary"
                "event-backend-libuv"
                "rove")
   :pathname "tests"
@@ -102,7 +103,8 @@
                (:file "ag-ui-test")
                (:file "a2a-test")
                (:file "telemetry-test")
-               (:file "durability-test"))
+               (:file "durability-test")
+               (:file "harness-test"))
   :perform (test-op (o c)
              (unless (symbol-call :rove :run c)
                (error "tests failed for ~A" (component-name c)))))

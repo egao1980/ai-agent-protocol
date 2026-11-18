@@ -16,6 +16,9 @@
   (let* ((settings (agent-run-settings run))
          (extra (agent-settings-extra settings))
          (llm (agent-settings-llm settings)))
+    (when (agent-run-wrap-up-p run)
+      ;; Tools stay in the request (cached prefix intact); none may be called.
+      (return-from %tool-choice :none))
     (or (%plist-get extra :tool-choice)
         (and (= 1 (agent-run-step run))
              (%plist-get extra :first-tool-choice))
@@ -69,7 +72,18 @@
    :parts (mapcar #'%plist-part (getf plist :parts))))
 
 (defun %generate-step-key (run)
-  (format nil "generate/~d" (agent-run-step run)))
+  (format nil "generate/~d~:[~;/wrap-up~]" (agent-run-step run)
+          (agent-run-wrap-up-p run)))
+
+(defun %extra (run key &optional default)
+  "KEY of the run's AGENT-SETTINGS-EXTRA plist, or DEFAULT when absent."
+  (let ((extra (agent-settings-extra (agent-run-settings run))))
+    (if (listp extra) (getf extra key default) default)))
+
+(defparameter +max-steps-prompt+
+  "You have reached the maximum number of steps for this task, and tools are now disabled. Reply with what you accomplished, what remains to be done, and the next step you would take."
+  "User turn added for the tool-less wrap-up generate at max steps
+(override per run with settings extra :max-steps-prompt).")
 
 (defun %tool-step-key (inv)
   (format nil "tool/~a" (agent-invocation-id inv)))
@@ -225,6 +239,13 @@
                 (remove :system (agent-run-turns run) :key #'llm-turn-role)))
     (%emit run :handoff specialist)))
 
+(defun %unknown-tool-text (run name)
+  (let ((names (loop for d in (collect-run-tools (agent-run-agent run)
+                                                 :extra (agent-run-extra run))
+                     when (llm-tool-p d) collect (llm-tool-name d))))
+    (format nil "Unknown tool ~s. Call only the tools you were given~@[: ~{~a~^, ~}~]."
+            name (subseq names 0 (min 40 (length names))))))
+
 (defun %classify (run call)
   (let* ((name (llm-tool-call-part-name call))
          (args (or (llm-tool-call-part-arguments call) "{}"))
@@ -256,7 +277,7 @@
          (when (eq act :skip)
            (setf (agent-invocation-status inv) :error
                  (agent-invocation-error-p inv) t
-                 (agent-invocation-result inv) (format nil "unknown tool ~s" name)))))
+                 (agent-invocation-result inv) (%unknown-tool-text run name)))))
       ((not (tool-executable-p source name))
        (setf (agent-invocation-status inv) :deferred))
       ((agent-approve-p (agent-run-agent run) source name args)
@@ -394,7 +415,8 @@
                                                   (setf (agent-invocation-status inv) :error
                                                         (agent-invocation-error-p inv) t
                                                         (agent-invocation-result inv)
-                                                        (princ-to-string c))
+                                                        (tool-failure-text
+                                                         c (agent-invocation-name inv)))
                                                   (%durable-record-step
                                                    run "tool"
                                                    (list :status :error
@@ -411,7 +433,12 @@
           (return-from %on-generate))
         (setf (agent-run-last-response run) response)
         (%commit-assistant-turn run response)
+        (setf (agent-run-usage-anchor run) (length (agent-run-turns run))
+              (agent-run-generate-attempt run) 1)
         (%emit run :response response)
+        (when (agent-run-wrap-up-p run)
+          (%strip-tool-calls run)
+          (return-from %on-generate (%finish run :max-steps callback)))
         (let ((calls (%committed-tool-calls run))
               (reason (llm-response-finish-reason response)))
           (cond
@@ -504,9 +531,129 @@
                           (progn :fail)))))
              (cond
                ((eq act :retry)
+                (%discard-in-flight run)
                 (%do-generate run callback error-callback))
                ((eq act :fail)
-                (funcall error-callback c))))))))))
+                (%recover-generate run c callback error-callback))))))))))
+
+(defun %discard-in-flight (run)
+  "Drop the partial assistant turn a failed streaming step left behind."
+  (let ((turn (agent-run-in-flight-turn run)))
+    (when turn
+      (setf (agent-run-turns run) (remove turn (agent-run-turns run) :test #'eq)
+            (agent-run-in-flight-turn run) nil))))
+
+(defun %strip-tool-calls (run)
+  "The wrap-up reply may not call tools: drop any calls it made anyway, so
+history never holds a call without a result."
+  (let ((turn (find :assistant (agent-run-turns run) :key #'llm-turn-role
+                                                     :from-end t)))
+    (when turn
+      (setf (llm-turn-parts turn)
+            (or (remove-if #'llm-tool-call-part-p (llm-turn-parts turn))
+                (list (make-llm-text-part :text "(max steps reached)")))))))
+
+(defun %recover-generate (run c callback error-callback)
+  "No handler recovered generate failure C. Compact once on context overflow;
+retry what the retry policy covers after its delay (on the loop, without
+blocking it); otherwise fail the run."
+  (let ((step (agent-run-step run)))
+    (cond
+      ((and (typep c 'llm-context-overflow)
+            (%compactor run)
+            (not (eql (agent-run-compacted-step run) step)))
+       (setf (agent-run-compacted-step run) step)
+       (%discard-in-flight run)
+       (%emit run :retry (list :reason :context-overflow :condition c))
+       (%maybe-compact run
+                       (lambda (did)
+                         (if did
+                             (%do-generate run callback error-callback)
+                             (funcall error-callback c)))
+                       error-callback
+                       :force t))
+      (t
+       (let* ((attempt (agent-run-generate-attempt run))
+              (delay (retry-delay (%extra run :retry-policy *retry-policy*)
+                                  c attempt)))
+         (if (null delay)
+             (funcall error-callback c)
+             (multiple-value-bind (eb el) (%event-context)
+               (setf (agent-run-generate-attempt run) (1+ attempt))
+               (%discard-in-flight run)
+               (%emit run :retry (list :reason (llm-retry-class c) :attempt attempt
+                                       :delay delay :condition c))
+               (event:sleep* eb el delay
+                             :callback (lambda ()
+                                         (unless (%check-canceled run callback)
+                                           (%do-generate run callback
+                                                         error-callback)))))))))))
+
+;;; --- agent-side compaction -------------------------------------------------
+;;; Settings extra :compaction is a conversation memory (e.g. summary-memory);
+;;; COMPACT-TURNS on it shrinks the run's turns. It runs before a step whose
+;;; prompt (measured usage + estimate) exceeds :compact-at, or the model's
+;;; context window less the completion reserve, and once on context overflow.
+;;; API-side compaction is the backend's job (llm-protocol-anthropic
+;;; :server-compaction); the two can be combined.
+
+(defun %compactor (run)
+  (%extra run :compaction))
+
+(defun %compact-limit (run backend)
+  (or (%extra run :compact-at)
+      (let ((window (context-window backend nil))
+            (llm (coerce-settings (agent-settings-llm (agent-run-settings run)))))
+        (and window
+             (- window (or (and llm (llm-settings-max-tokens llm)) 4096))))))
+
+(defun %maybe-compact (run next error-callback &key force)
+  "Call NEXT with T after compacting the run's turns, or NIL when nothing was
+compacted. Counting and summarizing run off the loop."
+  (let ((mem (%compactor run)))
+    (if (null mem)
+        (funcall next nil)
+        (let* ((turns (agent-run-turns run))
+               (backend (%backend run))
+               (anchor (agent-run-usage-anchor run))
+               (response (agent-run-last-response run))
+               (usage (and anchor response (llm-response-usage response))))
+          (%off-loop
+           (lambda ()
+             (when (or force
+                       (let ((limit (%compact-limit run backend)))
+                         (and limit
+                              (> (anchored-token-count backend turns
+                                                       :usage usage
+                                                       :anchor-count (or anchor 0))
+                                 limit))))
+               (multiple-value-list
+                (conversation:compact-turns mem turns :backend backend))))
+           (lambda (result)
+             (let ((did (and result (second result))))
+               (when did
+                 (setf (agent-run-turns run) (first result)
+                       (agent-run-usage-anchor run) nil)
+                 (%emit run :compacted (list :before (length turns)
+                                             :after (length (first result)))))
+               (funcall next did)))
+           error-callback)))))
+
+(defun %wrap-up-or-finish (run callback error-callback)
+  "At max steps: one more GENERATE with tools disabled so the run ends with a
+summary instead of a dangling tool loop (settings extra :max-steps-wrap-up nil
+turns it off), then finish :max-steps."
+  (if (or (agent-run-wrap-up-p run)
+          (not (%extra run :max-steps-wrap-up t)))
+      (%finish run :max-steps callback)
+      (progn
+        (setf (agent-run-wrap-up-p run) t
+              (agent-run-turns run)
+              (append (agent-run-turns run)
+                      (list (user-turn (%extra run :max-steps-prompt
+                                               +max-steps-prompt+)))))
+        (%emit run :wrap-up (agent-run-step run))
+        (%do-generate run callback error-callback))))
 
 (defun %tick-run (run callback error-callback)
   (when (%check-canceled run callback)
@@ -528,10 +675,15 @@
                      :report "Stop the run"
                      (progn :finish)))))
         (when (eq act :finish)
-          (return-from %tick-run (%finish run :max-steps callback)))))
+          (return-from %tick-run
+            (%wrap-up-or-finish run callback error-callback)))))
     (incf (agent-run-step run))
     (%emit run :step (agent-run-step run))
-    (%do-generate run callback error-callback)))
+    (%maybe-compact run
+                    (lambda (did)
+                      (declare (ignore did))
+                      (%do-generate run callback error-callback))
+                    error-callback)))
 
 (defmethod run-ai-agent-async ((agent ai-agent) turns &key settings tools on-event
                                on-part callback error-callback session durability)
