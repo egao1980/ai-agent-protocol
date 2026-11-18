@@ -181,7 +181,16 @@
              :initform (make-agent-settings))
    (session :initarg :session :accessor agent-run-session :initform nil)
    (memory :initarg :memory :accessor agent-run-memory :initform nil)
-   (durability :initarg :durability :accessor agent-run-durability :initform nil)))
+   (durability :initarg :durability :accessor agent-run-durability :initform nil)
+   (usage-anchor :accessor agent-run-usage-anchor :initform nil
+                 :documentation "Turn count the last response's usage measured
+(prompt + reply); turns after it are estimated. NIL after a compaction.")
+   (generate-attempt :accessor agent-run-generate-attempt :initform 1
+                     :documentation "1-based attempt of the current generate step.")
+   (compacted-step :accessor agent-run-compacted-step :initform nil
+                   :documentation "Step that already compacted on overflow.")
+   (wrap-up-p :accessor agent-run-wrap-up-p :initform nil
+              :documentation "T during the tool-less generate after max steps.")))
 
 (defun make-agent-run (&key agent turns invocations pending (step 0)
                          finish-reason last-response handle on-event on-part

@@ -61,6 +61,25 @@ Optional `task-protocol` `:durability` (`ai-agent-protocol/durability`) — each
                                                            :body "Always cite.")))
 ```
 
+### Long runs: retries, compaction, max steps, tool failures
+
+Settings `:extra` keys (plist) steer the loop; all are optional.
+
+- **Retry by failure class.** A generate failure no handler recovered is retried when `:retry-policy` (default `llm-protocol:*retry-policy*`) covers its `llm-retry-class` — rate limit, overload, transient 5xx — after the policy's delay, scheduled on the event loop (`event:sleep*`), not by blocking it. Bad requests and auth failures fail at once. A partial streamed turn is discarded before the retry. Events: `:retry` with `(:reason class :attempt n :delay s :condition c)`. Handlers on `agent-generate-error` still win (`retry` / `use-value` / `abort`).
+- **Agent-side compaction.** `:compaction` is a conversation memory (e.g. `stack-conversation:make-summary-memory :backend b`). Before a step whose prompt exceeds `:compact-at` tokens — or the model's context window less the completion reserve — `conversation:compact-turns` replaces the history with a templated summary plus the newest turns verbatim. The count is the last response's measured `llm-usage` plus an estimate for the turns since (`anchored-token-count`). On `llm-context-overflow` the run compacts once and retries the step. Event: `:compacted`.
+- **API-side compaction** is the backend's job: `llm-protocol-anthropic` `:server-compaction` lets the API summarize in place. The two combine; the agent's threshold then only matters for a backend without it.
+- **Max steps wrap-up.** At `max-steps` the run makes one more generate with `tool-choice :none` (tools stay in the request, so the cached prefix holds) after a user turn `+max-steps-prompt+` (override: `:max-steps-prompt`), so it ends with a summary of done / left / next instead of a dangling tool loop. Finish reason stays `:max-steps`. `:max-steps-wrap-up nil` turns it off.
+- **Typed tool failures.** A tool handler signals `tool-input-error`, `tool-unavailable` or `tool-timeout` (`tool-failure` subtypes) and the model gets a result that says what to do next ("Fix the arguments…", "Do not call it again…"). `tool-failure-kind` / `tool-failure-text` are generic: specialize them for a source's own errors. An unknown tool name gets the list of tools it may call.
+
+```lisp
+(make-ai-agent :name "coder" :backend backend
+               :settings (make-agent-settings
+                          :max-steps 40
+                          :extra (list :compaction (stack-conversation:make-summary-memory
+                                                    :backend backend :tail-tokens 15000)
+                                       :retry-policy (stack-llm:make-retry-policy :max-attempts 6))))
+```
+
 MCP sampling (`create-message` → `generate`) is `ai-agent-protocol/mcp:make-mcp-sampling-handler` — **not** in `llm-protocol`.
 
 Live LM Studio cycle (instructions + user prompt + CL `add` tool):
