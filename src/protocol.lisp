@@ -202,6 +202,24 @@ as :canceled.")
     (when (and d fn)
       (funcall fn d :prompt prompt))))
 
+(defun %durable-peek (run name key)
+  "(values T result) when NAME/KEY is journaled for RUN; does not consume."
+  (let ((d (and run (agent-run-durability run)))
+        (fn (%durability-fn "DURABLE-STEP-RECORDED")))
+    (if (and d fn)
+        (funcall fn d name :idempotency-key key)
+        (values nil nil))))
+
+(defun %durable-steps (run name)
+  (let ((d (and run (agent-run-durability run)))
+        (fn (%durability-fn "DURABLE-RECORDED-STEPS")))
+    (and d fn (funcall fn d name))))
+
+(defun %durable-state-version (run)
+  (let ((d (and run (agent-run-durability run)))
+        (fn (%durability-fn "DURABLE-STATE-VERSION")))
+    (and d fn (funcall fn d))))
+
 (defun %durable-hitl-key (invocation)
   (format nil "hitl/~a" (agent-invocation-id invocation)))
 

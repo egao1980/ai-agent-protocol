@@ -1,6 +1,6 @@
 # ai-agent-protocol
 
-Version **0.6.0**.
+Version **0.7.0**.
 
 Async-first CLOS **agent loop** over [`llm-protocol`](https://github.com/egao1980/llm-protocol). Not blackboard core. Not AG-UI `run-agent` — that's `ag-ui-protocol:run-agent`. Use `run-ai-agent` / `run-ai-agent-async`.
 
@@ -44,6 +44,16 @@ Optional [`conversation-protocol`](https://github.com/egao1980/conversation-prot
 Optional [`steer-protocol`](https://github.com/egao1980/steer-protocol) `:steering` — rules / `SKILL.md` skills (not A2A `agent-skill`). Applied after recall; merged into the system turn. `make-skill-tool-source` is a thin tool source that lists `skill-tools` and dispatches `skill-tool-fn` (same shape as `make-mcp-tool-source`).
 
 Optional `task-protocol` `:durability` (`ai-agent-protocol/durability`) — each `generate` and tool invocation is a `with-durable-step` (idempotency key per step). HITL approve/deny journals `wait-input`; `run-ai-agent` with the same journal replays completed steps and continues. Crashes resume mid-run.
+
+#### Durable run state: subagents, inbox, instructions
+
+Since 0.7 the journal also carries the long-run state, as more `step-completed` events (names `inbox` and `instructions`, keyed by position):
+
+- **Inbox.** Every queued turn (`agent-run-post`, subagent reports) is journaled when it is queued (`inbox/post/<n>`), and which posts each generate received (`inbox/drain/generate/<step>`). Replay delivers the same turns at the same steps. Posts that were queued but not yet delivered at the crash are delivered before the first generate past the journal.
+- **Subagents.** Tasks come back as the replay passes their `subagent` tool calls (same ids), and take the status and result their journaled reports carried. An **idle** child's history is journaled with its report, so it can still be continued by id after a restart.
+- **Children live at the crash** (`:running`, or `:paused` for approval) cannot be reattached: their process is gone, and re-running them would repeat side effects. Once the replay passes the end of the journal they are **lost**: status `:failed`, result `+lost-subagent-text+`, `subagent-task-restored-p` true, event `:subagent` `(:event :lost :task task)`, and the parent gets a `<subagent … status="failed">` report, the same path as a child that failed. They are not restarted; the model can start a new one. A parent that waited for them (`:subagents-on-finish :wait`) gets the report and takes another step; with `:cancel` they are canceled as live children would be; with `:detach` the report stays queued.
+- **Instructions.** The directives injected before each generate are journaled (`instructions/generate/<step>`). Replay injects those, not what is on disk now, and restores the run's injected set (`agent-run-instructions`), so files are neither injected twice nor lost; past the journal, discovery goes on from that set.
+- **Older journals.** A journal is marked (`agent-state` / `version`) when its first step is written. A journal with steps but no marker was written before 0.7 and replays as it did then: no subagent or inbox restore, instructions found again from disk.
 
 `tests/durability-test.lisp` runs in default `test-op` / `:ci :with` (`task-protocol` is on GHCR). `(asdf:test-system "ai-agent-protocol")` includes kill-and-replay coverage. The `ai-agent-protocol/durability-tests` system is a thin alias of the same suite.
 
@@ -142,7 +152,7 @@ With steer-protocol **0.3**, `AGENTS.md` files are loaded when a tool call first
                  :tools (list (make-subagent-tool (list researcher)))))
 ```
 
-Approval and inbox state is in memory: durability does not journal subagents yet.
+With `:durability`, subagents, the inbox and injected instructions are journaled too — see [Durable run state](#durable-run-state-subagents-inbox-instructions).
 
 MCP sampling (`create-message` → `generate`) is `ai-agent-protocol/mcp:make-mcp-sampling-handler` — **not** in `llm-protocol`.
 

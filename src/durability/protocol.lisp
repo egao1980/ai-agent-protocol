@@ -132,3 +132,46 @@
        (if already
            task
            (request-input task :prompt prompt))))))
+
+;;; --- run state (0.7) ----------------------------------------------------------
+;;; Subagents, the inbox and injected instructions are journaled as more
+;;; STEP-COMPLETED events ("inbox", "instructions"). A journal written before
+;;; has no "agent-state" marker and replays as it always did.
+
+(defconstant +agent-state-version+ 1
+  "Version of the run-state records a journal carries.")
+
+(defun durable-step-recorded (durability name &key idempotency-key)
+  "(values T result) when NAME/KEY is journaled. Does not consume it."
+  (let ((recorded (%find-exact-step (agent-durability-journal durability)
+                                    (agent-durability-task durability)
+                                    (%normalize-step-name name)
+                                    idempotency-key)))
+    (if recorded
+        (values t (step-result recorded))
+        (values nil nil))))
+
+(defun durable-recorded-steps (durability name)
+  "Results of the journaled steps called NAME, oldest first, as
+   (idempotency-key . result)."
+  (let ((name (%normalize-step-name name)))
+    (loop for e in (journal-events (agent-durability-journal durability)
+                                   (agent-durability-task durability))
+          when (and (typep e 'step-completed) (equal name (step-name e)))
+            collect (cons (step-idempotency-key e) (step-result e)))))
+
+(defun durable-state-version (durability)
+  "+AGENT-STATE-VERSION+ when the journal carries run state; NIL for a journal
+   with steps written before 0.7 (replayed without it). A journal with no steps
+   yet is marked now."
+  (multiple-value-bind (hit version)
+      (durable-step-recorded durability "agent-state" :idempotency-key "version")
+    (cond
+      (hit version)
+      ((find-if (lambda (e) (typep e 'step-completed))
+                (journal-events (agent-durability-journal durability)
+                                (agent-durability-task durability)))
+       nil)
+      (t
+       (record-durable-step durability "agent-state" +agent-state-version+
+                            :idempotency-key "version")))))
