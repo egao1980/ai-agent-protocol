@@ -50,6 +50,12 @@
    #:*permission-policy*
    #:permission-policy-effect
    #:agent-permission
+   #:permission-rule-store
+   #:save-permission-rule
+   #:list-permission-rules
+   #:in-memory-permission-rule-store
+   #:make-in-memory-permission-rule-store
+   #:tool-permission-always-resources
 
    #:subagent-tool
    #:make-subagent-tool
@@ -93,6 +99,8 @@
    #:invoke-skip-tool
    #:invoke-approve
    #:invoke-deny
+   #:invoke-approve-always
+   #:invoke-deny-all
    #:invoke-pause-for-approval
    #:auto-skip-tool
    #:auto-pause-approval
@@ -113,6 +121,7 @@
    #:ai-agent-session
    #:ai-agent-steering
    #:ai-agent-permissions
+   #:ai-agent-permission-store
    #:register-agent-handoff
    #:unregister-agent-handoff
    #:defagent
@@ -167,6 +176,7 @@
    #:agent-run-in-flight-turn
    #:agent-run-session
    #:agent-run-durability
+   #:agent-run-approved-permissions
 
    #:agent-run-handle
    #:agent-run-handle-p

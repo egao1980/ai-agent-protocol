@@ -240,7 +240,11 @@ new segment, keyed \"cN/BASE\" (#16)."
                                 :idempotency-key (%durable-hitl-key run inv))
       (when hit
         (if (eq (getf result :decision) :approved)
-            (setf (agent-invocation-status inv) :approved)
+            (progn
+              ;; An "always" reply: its rules decide later calls of the run.
+              (%add-approved-permissions
+               run (coerce-permission-rules (getf result :rules)))
+              (setf (agent-invocation-status inv) :approved))
             (setf (agent-invocation-status inv) :denied
                   (agent-invocation-result inv)
                   (or (getf result :reason) "denied")
@@ -289,20 +293,35 @@ requires ai-agent-protocol/durability. Returns AGENT-RUN-HANDLE."))
                                        :durability durability))
               :timeout timeout))))
 
-(defun approve-invocation (run invocation &key)
-  (setf (agent-invocation-status invocation) :approved)
-  (setf (agent-run-pending run)
-        (remove invocation (agent-run-pending run)))
-  (%durable-record-step run "hitl"
-                        (list :decision :approved)
-                        :idempotency-key (%durable-hitl-key run invocation))
-  (%emit run :invocation invocation)
+(defun approve-invocation (run invocation &key always)
+  "Approve a :proposed INVOCATION once. With ALWAYS (opencode's \"always\"
+reply) also allow matching calls for the rest of RUN: one :allow rule per
+TOOL-PERMISSION-ALWAYS-RESOURCES goes on AGENT-RUN-APPROVED-PERMISSIONS and
+through SAVE-PERMISSION-RULE into the run's PERMISSION-RULE-STORE, and every
+other pending invocation those rules now allow is approved too. The rules only
+answer asks: a deny rule or a policy still wins."
+  (let ((rules (and always (%remember-approval run invocation))))
+    (setf (agent-invocation-status invocation) :approved)
+    (setf (agent-run-pending run)
+          (remove invocation (agent-run-pending run)))
+    (%durable-record-step run "hitl"
+                          (list* :decision :approved
+                                 (and rules
+                                      (list :rules (mapcar #'%rule-list rules))))
+                          :idempotency-key (%durable-hitl-key run invocation))
+    (%emit run :invocation invocation)
+    (when rules
+      (dolist (other (%proposed-invocations run))
+        (when (%now-allowed-p run other)
+          (approve-invocation run other)))))
   run)
 
-(defun deny-invocation (run invocation &key reason feedback)
+(defun deny-invocation (run invocation &key reason feedback all)
   "Reject a :proposed INVOCATION. With FEEDBACK the model gets a
 TOOL-PERMISSION-DENIED error result carrying it (what to do instead);
-otherwise the result is REASON (default \"denied\")."
+otherwise the result is REASON (default \"denied\"). With ALL (opencode's
+\"a rejection rejects every pending request\") every other :proposed
+invocation of RUN is rejected the same way."
   (if feedback
       (%refuse-invocation nil invocation (%rejection invocation feedback))
       (setf (agent-invocation-status invocation) :denied
@@ -316,6 +335,9 @@ otherwise the result is REASON (default \"denied\")."
                               :error-p (agent-invocation-error-p invocation))
                         :idempotency-key (%durable-hitl-key run invocation))
   (%emit run :invocation invocation)
+  (when all
+    (dolist (other (%proposed-invocations run))
+      (deny-invocation run other :reason reason :feedback feedback)))
   run)
 
 (defun complete-invocation (run invocation result &key error-p)
@@ -345,7 +367,7 @@ otherwise the result is REASON (default \"denied\")."
 (defmacro defagent (name superclasses &body body)
   "Define an AI-AGENT subclass. Options: (:name \"x\") (:instructions \"…\")
    (:settings form) (:tools form) (:handoffs form) (:memory form) (:session form)
-   (:steering form) (:permissions form).
+   (:steering form) (:permissions form) (:permission-store form).
    Slot forms like DEFCLASS.
    (defagent researcher ()
      \"Looks things up.\"
@@ -367,7 +389,9 @@ otherwise the result is REASON (default \"denied\")."
           (:memory (setf initargs (list* :memory (second opt) initargs)))
           (:session (setf initargs (list* :session (second opt) initargs)))
           (:steering (setf initargs (list* :steering (second opt) initargs)))
-          (:permissions (setf initargs (list* :permissions (second opt) initargs)))))
+          (:permissions (setf initargs (list* :permissions (second opt) initargs)))
+          (:permission-store
+           (setf initargs (list* :permission-store (second opt) initargs)))))
       `(progn
          (defclass ,name ,supers
            ,slots

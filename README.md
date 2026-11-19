@@ -1,6 +1,6 @@
 # ai-agent-protocol
 
-Version **0.9.0**.
+Version **0.10.0**.
 
 Async-first CLOS **agent loop** over [`llm-protocol`](https://github.com/egao1980/llm-protocol). Not blackboard core. Not AG-UI `run-agent` — that's `ag-ui-protocol:run-agent`. Use `run-ai-agent` / `run-ai-agent-async`.
 
@@ -116,7 +116,23 @@ Modelled on [opencode v2 permissions](https://opencode.ai/v2/permissions.md). A 
                           :extra (list :permission-policy '(("bash" "rm *" :deny)))))
 ```
 
-Not done: opencode's "always" replies (saved project rules) and "a rejection rejects every pending request".
+**Approval replies** (opencode's once / always / reject):
+
+- **Once.** `(approve-invocation run inv)` or `(invoke-approve c)`.
+- **Always.** `(approve-invocation run inv :always t)` or `(invoke-approve-always c)` approves the call and adds one `:allow` rule per resource (`tool-permission-always-resources`, default the call's `tool-permission-resources`; specialize to widen, e.g. a command to `"git status *"`) to `agent-run-approved-permissions` for the rest of the run, saves each through `save-permission-rule` in the run's store, and approves the other pending calls those rules now allow. Journaled with the hitl step, so durable replay restores the rules.
+- **Rule store.** `permission-rule-store` with GFs `save-permission-rule (store rule &key agent)` and `list-permission-rules (store &key agent)`; `make-in-memory-permission-rule-store :rules …` is the default implementation. Set it with `make-ai-agent :permission-store` (or `defagent` `(:permission-store …)`); settings `:extra :permission-store` overrides it per run. A product specializes the GFs to persist saved rules as project rules; later runs with the same store read them back.
+- **Saved rules only answer asks.** Store rules and the run's always rules are consulted only when the layers above decide `:ask`; a deny from any rule layer still wins, and the policy still tightens afterwards (a policy `:ask` keeps asking).
+- **Reject.** `(deny-invocation run inv :feedback "…")` rejects one call; `:all t` rejects every other pending call of the run the same way (opencode's "a rejection rejects every pending request"). From a handler: `(invoke-deny-all c "…")`.
+
+```lisp
+(let ((store (make-in-memory-permission-rule-store)))
+  (make-ai-agent :name "coder" :backend backend
+                 :permissions '(("edit" "*" :ask))
+                 :permission-store store))
+;; paused on an edit of src/a.lisp:
+(approve-invocation run inv :always t)   ; ("edit" "src/a.lisp" :allow) saved
+(list-permission-rules store)            ; → (#<PERMISSION-RULE "edit" "src/a.lisp" :ALLOW>)
+```
 
 ### Path-scoped instructions, found as the agent reaches them
 

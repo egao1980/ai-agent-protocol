@@ -65,10 +65,15 @@ resource strings (paths, commands) the permission rules match against.")))
    (permissions :initarg :permissions :accessor ai-agent-permissions
                 :initform nil
                 :documentation "Ordered PERMISSION-RULEs (agent layer). Run
-settings extra :permissions are appended after them; the last match wins.")))
+settings extra :permissions are appended after them; the last match wins.")
+   (permission-store :initarg :permission-store :accessor ai-agent-permission-store
+                     :initform nil
+                     :documentation "PERMISSION-RULE-STORE where \"always\"
+approvals are saved and read back, or NIL. Run settings extra
+:permission-store overrides it.")))
 
 (defun make-ai-agent (&key (name "agent") backend instructions tools handoffs settings
-                        memory session steering permissions)
+                        memory session steering permissions permission-store)
   (make-instance 'ai-agent
                  :name name
                  :backend (or backend llm-protocol:*llm-backend*)
@@ -79,7 +84,8 @@ settings extra :permissions are appended after them; the last match wins.")))
                  :memory memory
                  :session session
                  :steering (and steering (steer:coerce-steering steering))
-                 :permissions permissions))
+                 :permissions permissions
+                 :permission-store permission-store))
 
 (defun ai-agent-p (x)
   (typep x 'ai-agent))
@@ -228,6 +234,9 @@ the configured one, so what is in context is per run), or NIL.")
    (instructions-reinject :accessor agent-run-instructions-reinject :initform nil
                           :documentation "Instruction files to re-inject after a
 compaction dropped them from context.")
+   (approved-permissions :accessor agent-run-approved-permissions :initform nil
+                         :documentation ":allow PERMISSION-RULEs from \"always\"
+approvals in this run, oldest first. They only answer asks.")
    (journal-state :accessor agent-run-journal-state :initform nil
                   :documentation "RUN-JOURNAL-STATE when durability journals run
 state (subagents, inbox, instructions), else NIL.")))
