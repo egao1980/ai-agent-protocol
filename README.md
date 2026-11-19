@@ -1,6 +1,6 @@
 # ai-agent-protocol
 
-Version **0.9.0**.
+Version **0.10.0**.
 
 Async-first CLOS **agent loop** over [`llm-protocol`](https://github.com/egao1980/llm-protocol). Not blackboard core. Not AG-UI `run-agent` — that's `ag-ui-protocol:run-agent`. Use `run-ai-agent` / `run-ai-agent-async`.
 
