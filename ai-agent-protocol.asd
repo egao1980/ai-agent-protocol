@@ -1,9 +1,9 @@
 (defsystem "ai-agent-protocol"
-  :version "0.8.0"
+  :version "0.9.0"
   :description "Async-first CLOS agent protocol over llm-protocol (CL tools, invocations, approvals)"
   :author "egao1980"
   :license "MIT"
-  :depends-on ((:version "llm-protocol" "0.4.0") "event-protocol" "bordeaux-threads"
+  :depends-on ((:version "llm-protocol" "0.5.0") "event-protocol" "bordeaux-threads"
                (:version "conversation-protocol" "0.3.0") (:version "steer-protocol" "0.3.0"))
   :properties (:cl-repo
                (:ci (:with ("ai-agent-protocol/mcp"
@@ -95,6 +95,7 @@
                "ai-agent-protocol/durability"
                "ai-agent-protocol/telemetry"
                "task-protocol"
+               (:version "conversation-protocol" "0.4.0")
                "conversation-protocol/summary"
                "event-backend-libuv"
                "json-backend-jzon"

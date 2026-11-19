@@ -33,39 +33,13 @@
 ;;; --- serial forms ------------------------------------------------------------
 
 (defun %part-state (part)
-  (cond
-    ((llm-text-part-p part) (list :type :text :text (llm-text-part-text part)))
-    ((llm-tool-call-part-p part)
-     (list :type :tool-call :id (llm-tool-call-part-id part)
-           :name (llm-tool-call-part-name part)
-           :arguments (llm-tool-call-part-arguments part)))
-    ((llm-tool-result-part-p part)
-     (list :type :tool-result :id (llm-tool-result-part-id part)
-           :name (llm-tool-result-part-name part)
-           :content (llm-tool-result-part-content part)
-           :error-p (and (llm-tool-result-part-error-p part) t)))
-    ((llm-thinking-part-p part)
-     (list :type :thinking :text (llm-thinking-part-text part)
-           :signature (llm-thinking-part-signature part)))
-    ((llm-image-part-p part)
-     (list :type :image :url (llm-image-part-url part)
-           :media-type (llm-image-part-media-type part)
-           :data (llm-image-part-data part)))
-    (t (list :type :text :text (princ-to-string part)))))
+  "Storable form of PART: LLM-PROTOCOL:PART-STATE, so thinking signatures,
+server tool calls and provider blocks (Anthropic compaction) replay exactly."
+  (part-state part))
 
 (defun %state-part (plist)
-  (ecase (getf plist :type)
-    (:text (make-llm-text-part :text (getf plist :text)))
-    (:tool-call (make-llm-tool-call-part :id (getf plist :id) :name (getf plist :name)
-                                         :arguments (or (getf plist :arguments) "{}")))
-    (:tool-result (make-llm-tool-result-part :id (getf plist :id) :name (getf plist :name)
-                                             :content (getf plist :content)
-                                             :error-p (getf plist :error-p)))
-    (:thinking (make-llm-thinking-part :text (getf plist :text)
-                                       :signature (getf plist :signature)))
-    (:image (make-llm-image-part :url (getf plist :url)
-                                 :media-type (getf plist :media-type)
-                                 :data (getf plist :data)))))
+  "→ the part PLIST stores, or NIL when no loaded system knows its :type."
+  (part-from-state plist))
 
 (defun %turn-state (turn)
   (list :role (llm-turn-role turn)
@@ -73,7 +47,7 @@
 
 (defun %state-turn (plist)
   (make-llm-turn :role (getf plist :role)
-                 :parts (mapcar #'%state-part (getf plist :parts))))
+                 :parts (remove nil (mapcar #'%state-part (getf plist :parts)))))
 
 (defun %pathname-state (x)
   (if (pathnamep x) (namestring x) x))
