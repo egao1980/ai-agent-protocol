@@ -178,17 +178,89 @@ POLICY is NIL, a rule list, or (lambda (action resources effect)).")
   (:method ((policy function) action resources effect)
     (funcall policy action resources effect)))
 
+;;; --- saved rules: the "always" reply -------------------------------------------
+
+(defclass permission-rule-store ()
+  ()
+  (:documentation "Where \"always\" approvals are saved, so a product can keep
+them as project rules across runs. Specialize SAVE-PERMISSION-RULE and
+LIST-PERMISSION-RULES. Saved rules only answer asks: a deny from any rule
+layer or a policy still wins."))
+
+(defgeneric save-permission-rule (store rule &key agent)
+  (:documentation "Save RULE (an :allow from an \"always\" approval in a run of
+AGENT) in STORE. → RULE. NIL STORE saves nothing.")
+  (:method ((store null) rule &key agent)
+    (declare (ignore agent))
+    rule))
+
+(defgeneric list-permission-rules (store &key agent)
+  (:documentation "→ the PERMISSION-RULEs saved in STORE that apply to AGENT,
+oldest first. Called on every ask, so cache in the store if reading is slow.")
+  (:method ((store null) &key agent)
+    (declare (ignore agent))
+    nil))
+
+(defclass in-memory-permission-rule-store (permission-rule-store)
+  ((rules :initarg :rules :initform nil)
+   (lock :initform (bt:make-lock "permission-rule-store")
+         :reader %permission-store-lock))
+  (:documentation "PERMISSION-RULE-STORE in a list, shared by every agent."))
+
+(defun make-in-memory-permission-rule-store (&key rules)
+  "Store holding RULES (rule objects or lists) to start with."
+  (make-instance 'in-memory-permission-rule-store
+                 :rules (coerce-permission-rules rules)))
+
+(defun %same-rule-p (a b)
+  (and (equal (permission-rule-action a) (permission-rule-action b))
+       (equal (permission-rule-resource a) (permission-rule-resource b))
+       (eq (permission-rule-effect a) (permission-rule-effect b))))
+
+(defmethod save-permission-rule ((store in-memory-permission-rule-store) rule
+                                 &key agent)
+  (declare (ignore agent))
+  (let ((rule (coerce-permission-rule rule)))
+    (bt:with-lock-held ((%permission-store-lock store))
+      (with-slots (rules) store
+        (unless (find rule rules :test #'%same-rule-p)
+          (setf rules (append rules (list rule))))))
+    rule))
+
+(defmethod list-permission-rules ((store in-memory-permission-rule-store)
+                                  &key agent)
+  (declare (ignore agent))
+  (bt:with-lock-held ((%permission-store-lock store))
+    (copy-list (slot-value store 'rules))))
+
+(defgeneric tool-permission-always-resources (source name arguments &key context)
+  (:documentation "→ resource globs an \"always\" approval of this call allows
+from now on (one :allow rule each). Default: TOOL-PERMISSION-RESOURCES, the
+exact resources. Specialize to widen, e.g. a shell command to \"git status *\".")
+  (:method (source name arguments &key context)
+    (tool-permission-resources source name arguments :context context)))
+
 ;;; --- deciding a call ------------------------------------------------------------
 
 (defun %context-get (context key)
   (and (consp context) (getf context key)))
 
+(defun %approved-rules (agent context)
+  "Saved rules (the store) then this run's \"always\" rules."
+  (append (list-permission-rules (or (%context-get context :permission-store)
+                                     (ai-agent-permission-store agent))
+                                 :agent agent)
+          (%context-get context :approved-permissions)))
+
 (defgeneric agent-permission (agent source name arguments &key context)
   (:documentation "→ (values EFFECT RULE RESOURCES) for AGENT calling NAME on
 SOURCE. EFFECT is :ALLOW, :ASK or :DENY. Rules are AI-AGENT-PERMISSIONS then
 CONTEXT :permissions (run settings); the last match wins. No match → the
-source's default (TOOL-NEEDS-APPROVAL-P → :ask). Then CONTEXT
-:permission-policy and *PERMISSION-POLICY* may tighten it.")
+source's default (TOOL-NEEDS-APPROVAL-P → :ask). An :ask is then answered by
+the saved rules (LIST-PERMISSION-RULES of CONTEXT :permission-store or
+AI-AGENT-PERMISSION-STORE) and CONTEXT :approved-permissions (this run's
+\"always\" replies), appended last; they never turn a deny into an allow.
+Then CONTEXT :permission-policy and *PERMISSION-POLICY* may tighten it.")
   (:method ((agent ai-agent) source name arguments &key context)
     (let* ((resources (tool-permission-resources source name arguments
                                                  :context context))
@@ -202,6 +274,13 @@ source's default (TOOL-NEEDS-APPROVAL-P → :ask). Then CONTEXT
                                                   :context context)
                            :ask
                            :allow)))
+        (when (eq effect :ask)
+          (let ((approved (%approved-rules agent context)))
+            (when approved
+              (multiple-value-bind (answer answer-rule)
+                  (permission-rules-effect (append rules approved) name resources)
+                (when (member answer '(:allow :deny))
+                  (setf effect answer rule answer-rule))))))
         (dolist (policy (list (%context-get context :permission-policy)
                               *permission-policy*))
           (multiple-value-bind (tight tight-rule)
@@ -213,7 +292,55 @@ source's default (TOOL-NEEDS-APPROVAL-P → :ask). Then CONTEXT
 (defun %permission-context (run)
   (list :run run
         :permissions (%extra run :permissions)
-        :permission-policy (%extra run :permission-policy)))
+        :permission-policy (%extra run :permission-policy)
+        :permission-store (%extra run :permission-store)
+        :approved-permissions (agent-run-approved-permissions run)))
+
+(defun %run-permission-store (run)
+  (or (%extra run :permission-store)
+      (ai-agent-permission-store (agent-run-agent run))))
+
+(defun %rule-list (rule)
+  "RULE as the (action resource effect) list COERCE-PERMISSION-RULE reads."
+  (list (permission-rule-action rule) (permission-rule-resource rule)
+        (permission-rule-effect rule)))
+
+(defun %add-approved-permissions (run rules)
+  (dolist (rule rules)
+    (unless (find rule (agent-run-approved-permissions run) :test #'%same-rule-p)
+      (setf (agent-run-approved-permissions run)
+            (append (agent-run-approved-permissions run) (list rule))))))
+
+(defun %remember-approval (run inv)
+  "The \"always\" reply for INV: one :allow rule per
+TOOL-PERMISSION-ALWAYS-RESOURCES, added to the run and saved in its store.
+→ the rules."
+  (let* ((name (agent-invocation-name inv))
+         (rules (mapcar (lambda (resource) (make-permission-rule name resource :allow))
+                        (remove-duplicates
+                         (tool-permission-always-resources
+                          (agent-invocation-source inv) name
+                          (agent-invocation-arguments inv)
+                          :context (%permission-context run))
+                         :test #'equal)))
+         (store (%run-permission-store run)))
+    (%add-approved-permissions run rules)
+    (dolist (rule rules)
+      (save-permission-rule store rule :agent (agent-run-agent run)))
+    (%emit run :permission (list :invocation inv :rules rules))
+    rules))
+
+(defun %proposed-invocations (run)
+  "RUN's invocations still waiting for an approval reply."
+  (remove-if-not (lambda (i) (eq (agent-invocation-status i) :proposed))
+                 (agent-run-invocations run)))
+
+(defun %now-allowed-p (run inv)
+  "T when INV, asked before, is now allowed (an \"always\" rule matches)."
+  (eq :allow (agent-permission (agent-run-agent run) (agent-invocation-source inv)
+                               (agent-invocation-name inv)
+                               (agent-invocation-arguments inv)
+                               :context (%permission-context run))))
 
 (defun %permission-denied-p (run inv source)
   "T after recording INV as denied when the permission rules (or a policy)

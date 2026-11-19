@@ -191,6 +191,21 @@ carrying that text (what to do instead)."
           (invoke-restart r feedback)
           (invoke-restart r)))))
 
+(defun invoke-approve-always (&optional condition)
+  "Invoke APPROVE-ALWAYS: approve, and allow matching calls for the rest of the
+run (see APPROVE-INVOCATION :always)."
+  (let ((r (find-restart 'approve-always condition)))
+    (when r (invoke-restart r))))
+
+(defun invoke-deny-all (&optional condition feedback)
+  "Invoke DENY-ALL: deny this and every other pending invocation of the run,
+each with FEEDBACK when given (see DENY-INVOCATION :all)."
+  (let ((r (find-restart 'deny-all condition)))
+    (when r
+      (if feedback
+          (invoke-restart r feedback)
+          (invoke-restart r)))))
+
 (defun invoke-pause-for-approval (&optional condition)
   (let ((r (find-restart 'pause-for-approval condition)))
     (when r (invoke-restart r))))

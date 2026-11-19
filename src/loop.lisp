@@ -282,6 +282,20 @@ empty text, as it always did."
     (%apply-journaled-hitl run inv)
     inv))
 
+(defun %read-approval-feedback ()
+  (format *query-io* "Feedback for the model (empty for none): ")
+  (force-output *query-io*)
+  (let ((line (read-line *query-io*)))
+    (and (plusp (length line)) (list line))))
+
+(defun %deny-offered (run inv feedback)
+  (if feedback
+      (%refuse-invocation run inv (%rejection inv feedback))
+      (setf (agent-invocation-status inv) :denied
+            (agent-invocation-result inv) "denied"
+            (agent-invocation-error-p inv) nil))
+  (%emit-invocation run inv))
+
 (defun %offer-approval (run inv)
   (when (eq (agent-invocation-status inv) :proposed)
     (restart-case
@@ -290,19 +304,24 @@ empty text, as it always did."
         :report "Approve the tool invocation"
         (setf (agent-invocation-status inv) :approved)
         (%emit-invocation run inv))
+      (approve-always ()
+        :report "Approve it and allow matching calls for the rest of the run"
+        (%remember-approval run inv)
+        (setf (agent-invocation-status inv) :approved)
+        (%emit-invocation run inv)
+        (dolist (other (%proposed-invocations run))
+          (when (%now-allowed-p run other)
+            (setf (agent-invocation-status other) :approved)
+            (%emit-invocation run other))))
       (deny (&optional feedback)
         :report "Deny the tool invocation"
-        :interactive (lambda ()
-                       (format *query-io* "Feedback for the model (empty for none): ")
-                       (force-output *query-io*)
-                       (let ((line (read-line *query-io*)))
-                         (and (plusp (length line)) (list line))))
-        (if feedback
-            (%refuse-invocation run inv (%rejection inv feedback))
-            (setf (agent-invocation-status inv) :denied
-                  (agent-invocation-result inv) "denied"
-                  (agent-invocation-error-p inv) nil))
-        (%emit-invocation run inv))
+        :interactive %read-approval-feedback
+        (%deny-offered run inv feedback))
+      (deny-all (&optional feedback)
+        :report "Deny it and every other pending invocation of the run"
+        :interactive %read-approval-feedback
+        (dolist (i (%proposed-invocations run))
+          (%deny-offered run i feedback)))
       (pause-for-approval ()
         :report "Pause the run for HITL approval"
         nil))))
