@@ -1,6 +1,6 @@
 # ai-agent-protocol
 
-Version **0.7.0**.
+Version **0.8.0**.
 
 Async-first CLOS **agent loop** over [`llm-protocol`](https://github.com/egao1980/llm-protocol). Not blackboard core. Not AG-UI `run-agent` — that's `ag-ui-protocol:run-agent`. Use `run-ai-agent` / `run-ai-agent-async`.
 
@@ -53,6 +53,8 @@ Since 0.7 the journal also carries the long-run state, as more `step-completed` 
 - **Subagents.** Tasks come back as the replay passes their `subagent` tool calls (same ids), and take the status and result their journaled reports carried. An **idle** child's history is journaled with its report, so it can still be continued by id after a restart.
 - **Children live at the crash** (`:running`, or `:paused` for approval) cannot be reattached: their process is gone, and re-running them would repeat side effects. Once the replay passes the end of the journal they are **lost**: status `:failed`, result `+lost-subagent-text+`, `subagent-task-restored-p` true, event `:subagent` `(:event :lost :task task)`, and the parent gets a `<subagent … status="failed">` report, the same path as a child that failed. They are not restarted; the model can start a new one. A parent that waited for them (`:subagents-on-finish :wait`) gets the report and takes another step; with `:cancel` they are canceled as live children would be; with `:detach` the report stays queued.
 - **Instructions.** The directives injected before each generate are journaled (`instructions/generate/<step>`). Replay injects those, not what is on disk now, and restores the run's injected set (`agent-run-instructions`), so files are neither injected twice nor lost; past the journal, discovery goes on from that set.
+- **Compaction** (0.8). Each agent-side compaction check is journaled (`compact/<step>`, `compact/<step>/overflow` on context overflow): either nothing was compacted, or the turns kept from the end plus the new turns put before them (the summary). Replay applies that record and makes no summarizer call, so the replayed history is the one the run had.
+- **Continuations** (0.8). `continue-ai-agent` / `continue-ai-agent-async` open a new segment (`agent-run-segment`): its keys are `c<n>/generate/<step>`, `c<n>/tool/<id>`, … so a continuation never replays the steps of the run before it. Replay is the same calls in the same order: `run-ai-agent`, then each `continue-ai-agent`, on the same journal. Segment 0 keeps the bare keys, so older journals replay unchanged.
 - **Older journals.** A journal is marked (`agent-state` / `version`) when its first step is written. A journal with steps but no marker was written before 0.7 and replays as it did then: no subagent or inbox restore, instructions found again from disk.
 
 `tests/durability-test.lisp` runs in default `test-op` / `:ci :with` (`task-protocol` is on GHCR). `(asdf:test-system "ai-agent-protocol")` includes kill-and-replay coverage. The `ai-agent-protocol/durability-tests` system is a thin alias of the same suite.
@@ -139,7 +141,7 @@ With steer-protocol **0.3**, `AGENTS.md` files are loaded when a tool call first
 
 - The call returns at once with an id (`sub-1`, …); the child runs beside the parent on the same event loop. The tool description tells the model not to poll: the result arrives in its inbox.
 - When the child finishes, its last reply is queued in the parent's inbox (`agent-run-post`) and injected before the parent's next generate as a user turn `<subagent id="sub-1" name="helper">text</subagent>` (`status="failed"` / `"paused"` when it failed or waits for approval).
-- Continue by id: a busy child gets the message in its own inbox, an idle one continues its history (`continue-ai-agent-async`). `find-subagent-task`, `continue-subagent`, `subagent-task-status` (`:running` `:idle` `:paused` `:failed` `:canceled`) are the Lisp API.
+- Continue by id: a busy child gets the message in its own inbox, an idle one continues its history (`continue-ai-agent-async`; sync `continue-ai-agent`). `find-subagent-task`, `continue-subagent`, `subagent-task-status` (`:running` `:idle` `:paused` `:failed` `:canceled`) are the Lisp API.
 - One level only: a run started as a subagent (`agent-run-parent`) gets `tool-unavailable` if it tries to start one.
 - A parent that ends its turn with live children waits (event `:waiting`) and takes another step when a report lands. Settings `:extra :subagents-on-finish` — `:wait` (default), `:cancel` (cancel them and finish), `:detach` (finish; later reports stay queued).
 - `cancel-agent-run` on the parent cancels its children; a waiting parent finishes `:canceled`. A parent that fails cancels them too.

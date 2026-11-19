@@ -193,14 +193,18 @@ return its SUBAGENT-TASK. The child's report lands in PARENT's inbox."
 
 (defun continue-ai-agent-async (run message &key callback error-callback)
   "Continue a finished (non-paused) RUN with a follow-up user MESSAGE (string
-or LLM-TURN): the step count restarts and the loop runs to the next finish."
+or LLM-TURN): the step count restarts and the loop runs to the next finish.
+Each continuation opens a new journal segment (AGENT-RUN-SEGMENT), so its
+steps never replay the earlier segments' records."
   (when (member (agent-run-finish-reason run) '(:approval :deferred) :test #'eq)
     (error 'agent-error :run run
                         :message "run is paused for approval; resume it instead"))
   (%event-context)
   (setf (agent-run-finish-reason run) nil
         (agent-run-step run) 0
+        (agent-run-segment run) (1+ (agent-run-segment run))
         (agent-run-wrap-up-p run) nil
+        (agent-run-compacted-step run) nil
         (agent-run-generate-attempt run) 1
         (agent-run-turns run)
         (append (agent-run-turns run)
@@ -209,6 +213,12 @@ or LLM-TURN): the step count restarts and the loop runs to the next finish."
         (err (or error-callback #'error)))
     (%call-on-loop (lambda () (%tick-run run ok err)))
     (agent-run-handle run)))
+
+(defun continue-ai-agent (run message)
+  "Await CONTINUE-AI-AGENT-ASYNC (drives the bound event loop). → RUN."
+  (%await (lambda (ok err)
+            (continue-ai-agent-async run message :callback ok :error-callback err))
+          :timeout (agent-settings-timeout (agent-run-settings run))))
 
 (defun continue-subagent (task message)
   "Send MESSAGE to TASK: queued in a running child's inbox, or continues an
