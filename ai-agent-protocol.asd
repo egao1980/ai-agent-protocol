@@ -95,7 +95,8 @@
                "ai-agent-protocol/durability"
                "ai-agent-protocol/telemetry"
                "task-protocol"
-               (:version "conversation-protocol/summary" "0.4.0")
+               (:version "conversation-protocol" "0.4.0")
+               "conversation-protocol/summary"
                "event-backend-libuv"
                "json-backend-jzon"
                "rove")
