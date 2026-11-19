@@ -70,6 +70,7 @@
    #:start-subagent
    #:continue-subagent
    #:continue-ai-agent-async
+   #:continue-ai-agent
    #:agent-run-post
    #:agent-run-inbox
    #:agent-run-subagents
@@ -156,6 +157,7 @@
    #:agent-run-invocations
    #:agent-run-pending
    #:agent-run-step
+   #:agent-run-segment
    #:agent-run-finish-reason
    #:agent-run-last-response
    #:agent-run-text

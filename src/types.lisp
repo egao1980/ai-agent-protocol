@@ -178,6 +178,9 @@ settings extra :permissions are appended after them; the last match wins.")))
    (invocations :initarg :invocations :accessor agent-run-invocations :initform nil)
    (pending :initarg :pending :accessor agent-run-pending :initform nil)
    (step :initarg :step :accessor agent-run-step :initform 0)
+   (segment :accessor agent-run-segment :initform 0
+            :documentation "0 for the first run, +1 per CONTINUE-AI-AGENT-ASYNC:
+keeps each continuation's journal keys apart (steps restart at 1).")
    (finish-reason :initarg :finish-reason :accessor agent-run-finish-reason
                   :initform nil)
    (last-response :initarg :last-response :accessor agent-run-last-response

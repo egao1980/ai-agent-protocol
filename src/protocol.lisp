@@ -220,15 +220,24 @@ as :canceled.")
         (fn (%durability-fn "DURABLE-STATE-VERSION")))
     (and d fn (funcall fn d))))
 
-(defun %durable-hitl-key (invocation)
-  (format nil "hitl/~a" (agent-invocation-id invocation)))
+(defun %segment-key (run base)
+  "Journal key BASE in RUN's current segment. Segment 0 (the first run) keeps
+the bare key, so older journals replay; each CONTINUE-AI-AGENT-ASYNC opens a
+new segment, keyed \"cN/BASE\" (#16)."
+  (let ((segment (if run (agent-run-segment run) 0)))
+    (if (zerop segment)
+        base
+        (format nil "c~d/~a" segment base))))
+
+(defun %durable-hitl-key (run invocation)
+  (%segment-key run (format nil "hitl/~a" (agent-invocation-id invocation))))
 
 (defun %apply-journaled-hitl (run inv)
   "If approve/deny was journaled, restore it onto INV."
   (when (eq (agent-invocation-status inv) :proposed)
     (multiple-value-bind (hit result)
         (%durable-step-replayed run "hitl"
-                                :idempotency-key (%durable-hitl-key inv))
+                                :idempotency-key (%durable-hitl-key run inv))
       (when hit
         (if (eq (getf result :decision) :approved)
             (setf (agent-invocation-status inv) :approved)
@@ -286,7 +295,7 @@ requires ai-agent-protocol/durability. Returns AGENT-RUN-HANDLE."))
         (remove invocation (agent-run-pending run)))
   (%durable-record-step run "hitl"
                         (list :decision :approved)
-                        :idempotency-key (%durable-hitl-key invocation))
+                        :idempotency-key (%durable-hitl-key run invocation))
   (%emit run :invocation invocation)
   run)
 
@@ -305,7 +314,7 @@ otherwise the result is REASON (default \"denied\")."
                         (list :decision :denied
                               :reason (agent-invocation-result invocation)
                               :error-p (agent-invocation-error-p invocation))
-                        :idempotency-key (%durable-hitl-key invocation))
+                        :idempotency-key (%durable-hitl-key run invocation))
   (%emit run :invocation invocation)
   run)
 

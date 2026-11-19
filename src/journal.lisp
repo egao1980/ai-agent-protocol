@@ -13,6 +13,12 @@
 ;;;   inbox / inbox/continue/<gen-key> T  the run went on after that generate
 ;;;                                   ended its turn (a report or inbox item)
 ;;;   instructions / instructions/<gen-key>  directives injected before it
+;;;   compact / compact/<step>[/overflow]  (:did NIL) or (:did T :keep K :head H)
+;;;                                   a compaction: the last K turns kept, H
+;;;                                   (turn states) put before them (0.8)
+;;;
+;;; Every key but inbox/post/<n> is per segment: a CONTINUE-AI-AGENT-ASYNC
+;;; prefixes its keys with "cN/" (segment 0, the first run, has none).
 ;;;
 ;;; Subagent tasks come back as the replay passes their subagent tool calls,
 ;;; then take the state their journaled reports carried. A child that was

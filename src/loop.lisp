@@ -72,8 +72,8 @@
    :parts (mapcar #'%plist-part (getf plist :parts))))
 
 (defun %generate-step-key (run)
-  (format nil "generate/~d~:[~;/wrap-up~]" (agent-run-step run)
-          (agent-run-wrap-up-p run)))
+  (%segment-key run (format nil "generate/~d~:[~;/wrap-up~]" (agent-run-step run)
+                            (agent-run-wrap-up-p run))))
 
 (defun %extra (run key &optional default)
   "KEY of the run's AGENT-SETTINGS-EXTRA plist, or DEFAULT when absent."
@@ -85,8 +85,9 @@
   "User turn added for the tool-less wrap-up generate at max steps
 (override per run with settings extra :max-steps-prompt).")
 
-(defun %tool-step-key (inv)
-  (format nil "tool/~a" (agent-invocation-id inv)))
+(defun %tool-step-key (run inv)
+  ;; Segmented: local models reuse call ids (call_0) across continuations.
+  (%segment-key run (format nil "tool/~a" (agent-invocation-id inv))))
 
 (defun %finish (run reason callback)
   (when (member reason '(:approval :deferred) :test #'eq)
@@ -368,7 +369,7 @@
   (%emit-invocation run inv))
 
 (defun %invoke-one-tool (run inv done)
-  (let ((key (%tool-step-key inv)))
+  (let ((key (%tool-step-key run inv)))
     (multiple-value-bind (hit plist)
         (%durable-step-replayed run "tool" :idempotency-key key)
       (cond
@@ -620,9 +621,32 @@ blocking it); otherwise fail the run."
         (and window
              (- window (or (and llm (llm-settings-max-tokens llm)) 4096))))))
 
+(defun %compact-step-key (run force)
+  (%segment-key run (format nil "compact/~d~:[~;/overflow~]"
+                            (agent-run-step run) force)))
+
+(defun %compaction-record (old new)
+  "Journal form of a compaction OLD → NEW: the turns NEW kept from the end of
+OLD (:keep, by identity) and the new turns before them (:head, e.g. the
+summary)."
+  (let ((keep (loop for a in (reverse old)
+                    for b in (reverse new)
+                    while (eq a b)
+                    count t)))
+    (list :did t
+          :keep keep
+          :head (mapcar #'%turn-state (butlast new keep)))))
+
+(defun %compaction-turns (old record)
+  "OLD's turns after replaying compaction RECORD."
+  (append (mapcar #'%state-turn (getf record :head))
+          (last old (getf record :keep))))
+
 (defun %maybe-compact (run next error-callback &key force)
   "Call NEXT with T after compacting the run's turns, or NIL when nothing was
-compacted. Counting and summarizing run off the loop."
+compacted. Counting and summarizing run off the loop. Under :durability the
+outcome is journaled and replayed verbatim: no second summarizer call, and the
+replayed history is the one the run had (#17)."
   (let ((mem (%compactor run)))
     (if (null mem)
         (funcall next nil)
@@ -630,28 +654,43 @@ compacted. Counting and summarizing run off the loop."
                (backend (%backend run))
                (anchor (agent-run-usage-anchor run))
                (response (agent-run-last-response run))
-               (usage (and anchor response (llm-response-usage response))))
-          (%off-loop
-           (lambda ()
-             (when (or force
-                       (let ((limit (%compact-limit run backend)))
-                         (and limit
-                              (> (anchored-token-count backend turns
-                                                       :usage usage
-                                                       :anchor-count (or anchor 0))
-                                 limit))))
-               (multiple-value-list
-                (conversation:compact-turns mem turns :backend backend))))
-           (lambda (result)
-             (let ((did (and result (second result))))
-               (when did
-                 (setf (agent-run-turns run) (first result)
-                       (agent-run-usage-anchor run) nil)
-                 (%instructions-compacted run)
-                 (%emit run :compacted (list :before (length turns)
-                                             :after (length (first result)))))
-               (funcall next did)))
-           error-callback)))))
+               (usage (and anchor response (llm-response-usage response)))
+               (key (%compact-step-key run force)))
+          (flet ((apply-compacted (new)
+                   (setf (agent-run-turns run) new
+                         (agent-run-usage-anchor run) nil)
+                   (%instructions-compacted run)
+                   (%emit run :compacted (list :before (length turns)
+                                               :after (length new)))))
+            (multiple-value-bind (hit record)
+                (%durable-step-replayed run "compact" :idempotency-key key)
+              (when hit
+                (let ((did (getf record :did)))
+                  (when did
+                    (apply-compacted (%compaction-turns turns record)))
+                  (return-from %maybe-compact (funcall next did)))))
+            (%off-loop
+             (lambda ()
+               (when (or force
+                         (let ((limit (%compact-limit run backend)))
+                           (and limit
+                                (> (anchored-token-count backend turns
+                                                         :usage usage
+                                                         :anchor-count (or anchor 0))
+                                   limit))))
+                 (multiple-value-list
+                  (conversation:compact-turns mem turns :backend backend))))
+             (lambda (result)
+               (let ((did (and result (second result) t)))
+                 (%durable-record-step run "compact"
+                                       (if did
+                                           (%compaction-record turns (first result))
+                                           (list :did nil))
+                                       :idempotency-key key)
+                 (when did
+                   (apply-compacted (first result)))
+                 (funcall next did)))
+             error-callback))))))
 
 (defun %wrap-up-or-finish (run callback error-callback)
   "At max steps: one more GENERATE with tools disabled so the run ends with a
