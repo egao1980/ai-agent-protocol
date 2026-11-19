@@ -373,6 +373,8 @@
         (%durable-step-replayed run "tool" :idempotency-key key)
       (cond
         (hit
+         (when (agent-run-journal-state run)
+           (%replay-tool-state run inv plist))
          (%apply-tool-plist run inv plist)
          (funcall done))
         (t
@@ -659,11 +661,12 @@ turns it off), then finish :max-steps."
           (not (%extra run :max-steps-wrap-up t)))
       (%finish run :max-steps callback)
       (progn
+        ;; Wrap-up first: drain and injection journal under the wrap-up key.
+        (setf (agent-run-wrap-up-p run) t)
         (%drain-inbox run)
         (unless (%inject-instructions-or-fail run error-callback)
           (return-from %wrap-up-or-finish))
-        (setf (agent-run-wrap-up-p run) t
-              (agent-run-turns run)
+        (setf (agent-run-turns run)
               (append (agent-run-turns run)
                       (list (user-turn (%extra run :max-steps-prompt
                                                +max-steps-prompt+)))))
@@ -746,6 +749,7 @@ USE-VALUE to a handler bound around the loop.)"
                 (funcall err0 c))))
     (setf (agent-run-parent run) *subagent-parent*)
     (%init-run-instructions run)
+    (%init-journal-state run)
     (%emit run :started run)
     (%call-on-loop (lambda () (%tick-run run ok err)))
     handle))
@@ -758,7 +762,8 @@ USE-VALUE to a handler bound around the loop.)"
   (when on-part
     (setf (agent-run-on-part run) on-part))
   (when durability
-    (setf (agent-run-durability run) (%coerce-durability durability)))
+    (setf (agent-run-durability run) (%coerce-durability durability))
+    (%init-journal-state run))
   (setf (agent-run-finish-reason run) nil)
   (let ((ok (or callback (lambda (v) (declare (ignore v)))))
         (err (or error-callback #'error))

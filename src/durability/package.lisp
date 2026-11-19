@@ -10,6 +10,10 @@
            #:call-durable-step
            #:durable-step-replayed
            #:record-durable-step
-           #:durable-wait-input))
+           #:durable-wait-input
+           #:durable-step-recorded
+           #:durable-recorded-steps
+           #:durable-state-version
+           #:+agent-state-version+))
 
 (in-package #:ai-agent-protocol/durability)

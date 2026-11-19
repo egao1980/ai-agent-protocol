@@ -63,6 +63,8 @@
    #:subagent-task-parent
    #:subagent-task-run
    #:subagent-task-status
+   #:subagent-task-restored-p
+   #:+lost-subagent-text+
    #:subagent-task-result
    #:find-subagent-task
    #:start-subagent

@@ -21,7 +21,10 @@
            :documentation ":RUNNING, :IDLE (finished, can be continued),
 :PAUSED (waiting for approval), :FAILED or :CANCELED.")
    (result :accessor subagent-task-result :initform nil
-           :documentation "Last reply text (or failure text) reported."))
+           :documentation "Last reply text (or failure text) reported.")
+   (restored-p :accessor subagent-task-restored-p :initform nil
+               :documentation "T for a task rebuilt from the journal: no child
+runs for it in this process."))
   (:documentation "One background subagent started by a parent run."))
 
 (defun subagent-task-name (task)
@@ -45,8 +48,14 @@
 (defun agent-run-post (run turn)
   "Queue TURN (an LLM-TURN or a string, sent as a user turn) for RUN. It is
 injected before RUN's next generate; a run waiting for its subagents wakes."
+  (%post run turn))
+
+(defun %post (run turn &key task)
+  "AGENT-RUN-POST; TASK is the SUBAGENT-TASK whose report TURN is (its state
+is journaled with the post)."
   (let ((turn (if (stringp turn) (user-turn turn) turn)))
     (bt:with-lock-held ((agent-run-inbox-lock run))
+      (%journal-post run turn task)
       (setf (agent-run-inbox run) (append (agent-run-inbox run) (list turn))))
     (let ((waiter (agent-run-waiter run)))
       (when waiter
@@ -56,8 +65,10 @@ injected before RUN's next generate; a run waiting for its subagents wakes."
 
 (defun %drain-inbox (run)
   "Append queued inbox turns to RUN's history (before a generate)."
-  (let ((turns (bt:with-lock-held ((agent-run-inbox-lock run))
-                 (shiftf (agent-run-inbox run) nil))))
+  (let ((turns (if (agent-run-journal-state run)
+                   (%journaled-drain run)
+                   (bt:with-lock-held ((agent-run-inbox-lock run))
+                     (shiftf (agent-run-inbox run) nil)))))
     (when turns
       (setf (agent-run-turns run) (append (agent-run-turns run) turns))
       (%emit run :inbox turns))
@@ -74,23 +85,40 @@ injected before RUN's next generate; a run waiting for its subagents wakes."
   "The model ended its turn. Inbox turns pending → one more step. Live
 subagents → per settings extra :subagents-on-finish: :wait (default) parks the
 run until a report arrives, :cancel cancels them, :detach leaves them."
-  (let ((live (%live-subagents run))
-        (policy (%extra run :subagents-on-finish :wait)))
-    (cond
-      ((agent-run-inbox run)
-       (%tick-run run callback error-callback))
-      ((and live (eq policy :wait))
-       (multiple-value-bind (eb el) (%event-context)
-         (setf (agent-run-waiter run)
-               (lambda ()
-                 (event:wake-call eb el
-                                  (lambda ()
-                                    (%tick-run run callback error-callback))))))
-       (%emit run :waiting live))
-      (t
-       (when (and live (eq policy :cancel))
-         (%cancel-subagents run))
-       (%finish run reason callback)))))
+  (let* ((policy (%extra run :subagents-on-finish :wait))
+         (state (agent-run-journal-state run))
+         (key (format nil "inbox/continue/~a" (%generate-step-key run))))
+    (flet ((continue-run ()
+             (when state
+               (%durable-record-step run "inbox" t :idempotency-key key))
+             (%tick-run run callback error-callback)))
+      (when state
+        (when (%durable-peek run "inbox" key)
+          ;; The journaled run went on from here: replay that.
+          (return-from %finish-or-await-subagents (%tick-run run callback error-callback)))
+        ;; Past the journal: undelivered posts are inbox items again, and
+        ;; children that were running at the crash will never report.
+        (%flush-replay-posts run)
+        (when (eq policy :wait)
+          (%fail-lost-subagents run)))
+      (let ((live (%live-subagents run)))
+        (cond
+          ((agent-run-inbox run)
+           (continue-run))
+          ((and live (eq policy :wait))
+           (multiple-value-bind (eb el) (%event-context)
+             (setf (agent-run-waiter run)
+                   (lambda ()
+                     (event:wake-call eb el #'continue-run))))
+           (%emit run :waiting live))
+          (t
+           (when (and live (eq policy :cancel))
+             (%cancel-subagents run))
+           (when state
+             ;; :detach — lost children's failure reports stay queued, like
+             ;; any report that lands after the parent finished.
+             (%fail-lost-subagents run))
+           (%finish run reason callback)))))))
 
 (defun %cancel-subagents (run)
   "Cancel RUN's live subagents. A run parked waiting for them wakes and
@@ -123,9 +151,10 @@ finishes as :canceled when its own handle is canceled."
                              (mapcar #'agent-invocation-name (agent-run-pending child)))
                      (or (agent-run-text child) "")))
            (%emit parent :subagent (list :event :reported :task task))
-           (agent-run-post parent (%subagent-report-turn
-                                   task (subagent-task-result task)
-                                   (and paused :paused)))))))))
+           (%post parent (%subagent-report-turn
+                          task (subagent-task-result task)
+                          (and paused :paused))
+                  :task task)))))))
 
 (defun %subagent-failed (task condition)
   (let ((parent (subagent-task-parent task)))
@@ -133,8 +162,9 @@ finishes as :canceled when its own handle is canceled."
       (setf (subagent-task-status task) :failed
             (subagent-task-result task) (princ-to-string condition))
       (%emit parent :subagent (list :event :failed :task task :condition condition))
-      (agent-run-post parent (%subagent-report-turn
-                              task (subagent-task-result task) :failed)))))
+      (%post parent (%subagent-report-turn
+                     task (subagent-task-result task) :failed)
+             :task task))))
 
 ;;; --- starting and continuing --------------------------------------------------
 
@@ -188,7 +218,12 @@ idle child. → :QUEUED or :CONTINUED."
      (agent-run-post (subagent-task-run task) message)
      :queued)
     (:idle
-     (setf (subagent-task-status task) :running)
+     (unless (subagent-task-run task)
+       (error 'tool-unavailable
+              :message (format nil "subagent ~a's history was not restored; start a new one"
+                               (subagent-task-id task))))
+     (setf (subagent-task-status task) :running
+           (subagent-task-restored-p task) nil)
      (continue-ai-agent-async
       (subagent-task-run task) message
       :callback (lambda (child) (%subagent-done task child))

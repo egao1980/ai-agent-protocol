@@ -170,7 +170,14 @@ compaction dropped). → the new directives."
     (when disc
       (let* ((paths (append (shiftf (agent-run-instructions-reinject run) nil)
                             (%new-invocation-paths run)))
-             (new (and paths (steer:discover-instructions disc paths))))
+             (new (multiple-value-bind (handled journaled)
+                      (%journaled-instructions run)
+                    (if handled
+                        ;; Replay: the set the journal recorded, not the disk.
+                        (steer:mark-instructions-injected disc journaled)
+                        (let ((found (and paths (steer:discover-instructions disc paths))))
+                          (%journal-instructions run found)
+                          found)))))
         (when new
           (setf (agent-run-turns run)
                 (append (agent-run-turns run)

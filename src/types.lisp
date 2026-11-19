@@ -224,7 +224,16 @@ the configured one, so what is in context is per run), or NIL.")
                          :documentation "Invocations already scanned for paths.")
    (instructions-reinject :accessor agent-run-instructions-reinject :initform nil
                           :documentation "Instruction files to re-inject after a
-compaction dropped them from context.")))
+compaction dropped them from context.")
+   (journal-state :accessor agent-run-journal-state :initform nil
+                  :documentation "RUN-JOURNAL-STATE when durability journals run
+state (subagents, inbox, instructions), else NIL.")))
+
+(defstruct (run-journal-state (:conc-name run-journal-))
+  "Inbox bookkeeping of a run whose journal carries run state."
+  (replay nil :type list)    ; journaled posts not yet drained (results), oldest first
+  (posted 0 :type fixnum)    ; posts journaled so far
+  (drained 0 :type fixnum))  ; posts delivered so far
 
 (defvar *subagent-parent* nil
   "Bound to the parent AGENT-RUN while it starts a background subagent;

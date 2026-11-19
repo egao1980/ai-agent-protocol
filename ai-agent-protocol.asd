@@ -1,5 +1,5 @@
 (defsystem "ai-agent-protocol"
-  :version "0.6.0"
+  :version "0.7.0"
   :description "Async-first CLOS agent protocol over llm-protocol (CL tools, invocations, approvals)"
   :author "egao1980"
   :license "MIT"
@@ -23,6 +23,7 @@
                (:file "instructions")
                (:file "loop")
                (:file "subagents")
+               (:file "journal")
                (:file "skill-source"))
   :in-order-to ((test-op (test-op "ai-agent-protocol/tests"))))
 
@@ -63,7 +64,7 @@
   :in-order-to ((test-op (test-op "ai-agent-protocol/tests"))))
 
 (defsystem "ai-agent-protocol/durability"
-  :version "0.3.0"
+  :version "0.4.0"
   :description "task-protocol journal for ai-agent-protocol (:durability)"
   :author "egao1980"
   :license "MIT"
@@ -111,7 +112,8 @@
                (:file "harness-test")
                (:file "permissions-test")
                (:file "subagents-test")
-               (:file "instructions-test"))
+               (:file "instructions-test")
+               (:file "durable-state-test"))
   :perform (test-op (o c)
              (unless (symbol-call :rove :run c)
                (error "tests failed for ~A" (component-name c)))))
