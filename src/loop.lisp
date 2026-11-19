@@ -41,24 +41,15 @@
                              :replace t))))
 
 (defun %part-plist (part)
-  (cond
-    ((llm-text-part-p part)
-     (list :type :text :text (llm-text-part-text part)))
-    ((llm-tool-call-part-p part)
-     (list :type :tool-call
-           :id (llm-tool-call-part-id part)
-           :name (llm-tool-call-part-name part)
-           :arguments (or (llm-tool-call-part-arguments part) "{}")))
-    (t (list :type :unknown))))
+  "Journal form of a generated PART (LLM-PROTOCOL:PART-STATE, lossless)."
+  (part-state part))
 
 (defun %plist-part (plist)
-  (case (getf plist :type)
-    (:text (make-llm-text-part :text (or (getf plist :text) "")))
-    (:tool-call (make-llm-tool-call-part
-                 :id (getf plist :id)
-                 :name (getf plist :name)
-                 :arguments (or (getf plist :arguments) "{}")))
-    (t (make-llm-text-part :text ""))))
+  "Read back %PART-PLIST. A part no loaded system knows (and the :unknown
+records journals before 0.9 wrote for thinking and provider parts) replays as
+empty text, as it always did."
+  (or (part-from-state plist)
+      (make-llm-text-part :text "")))
 
 (defun %response-plist (response)
   (list :finish-reason (llm-response-finish-reason response)

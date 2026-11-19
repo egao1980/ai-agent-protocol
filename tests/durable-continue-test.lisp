@@ -116,3 +116,79 @@ it answers. COUNTER's car counts generate calls."
                                                        "compact-run"))))
             (ok (= before (car sn)))
             (ok (equal (%turn-texts run) (%turn-texts run3)))))))))
+
+;;; --- lossless parts in the journal (#19) -----------------------------------------
+
+(defun %thinking-backend (counter)
+  "Like %ECHO-TOOL-BACKEND, but every reply opens with signed thinking."
+  (let ((inner (%echo-tool-backend counter)))
+    (make-mock-llm-backend
+     :handler (lambda (b turns &rest args &key &allow-other-keys)
+                (declare (ignore b))
+                (let ((r (apply (llm-protocol::mock-llm-handler inner) inner turns args)))
+                  (make-llm-response
+                   :parts (cons (make-llm-thinking-part
+                                 :text "pondering"
+                                 :signature (format nil "sig-~d" (car counter)))
+                                (llm-response-parts r))
+                   :finish-reason (llm-response-finish-reason r)))))))
+
+(defun %signatures (run)
+  (loop for turn in (agent-run-turns run)
+        append (loop for p in (llm-turn-parts turn)
+                     when (llm-thinking-part-p p)
+                       collect (llm-thinking-part-signature p))))
+
+(deftest durable-replay-keeps-signed-thinking
+  (with-agent-loop
+    (let* ((n (list 0))
+           (agent (make-ai-agent :name "think" :backend (%thinking-backend n)))
+           (journal (task-protocol:make-in-memory-journal)))
+      (define-agent-tool agent "noop" (:description "does nothing") (args)
+        (declare (ignore args))
+        "ok")
+      (let* ((run (run-ai-agent agent "go" :durability (%dur journal "think-run")))
+             (run2 (run-ai-agent agent "go"
+                                 :durability (%dur (task-protocol:copy-in-memory-journal
+                                                    journal)
+                                                   "think-run"))))
+        (ok (equal '("sig-1" "sig-2") (%signatures run)))
+        (ok (= 2 (car n)) "replay calls no generate")
+        (ok (equal (%signatures run) (%signatures run2))
+            "the replayed history carries the same signed thinking")))))
+
+(deftest durable-provider-compaction-replays-the-provider-block
+  (with-agent-loop
+    (let* ((n (list 0))
+           (cn (list 0))
+           (backend (make-mock-llm-backend
+                     :handler (llm-protocol::mock-llm-handler (%echo-tool-backend n))
+                     :compactor (lambda (turns &key instructions)
+                                  (declare (ignore turns instructions))
+                                  (format nil "PROVIDER-SUM-~d" (incf (car cn))))))
+           (mem (conversation-protocol:make-provider-compaction-memory))
+           (agent (make-ai-agent :name "pc" :backend backend
+                                 :settings (make-agent-settings
+                                            :extra (list :compaction mem :compact-at 3))))
+           (journal (task-protocol:make-in-memory-journal)))
+      (define-agent-tool agent "noop" (:description "does nothing") (args)
+        (declare (ignore args))
+        "ok")
+      (flet ((provider-summary (run)
+               (loop for turn in (agent-run-turns run)
+                     thereis (some #'llm-protocol:compaction-part-text
+                                   (llm-turn-parts turn)))))
+        (let ((run (run-ai-agent agent (%history) :durability (%dur journal "pc-run"))))
+          (ok (eq :stop (agent-run-finish-reason run)))
+          (ok (plusp (car cn)) "the provider compacted")
+          (ok (equal "PROVIDER-SUM-1" (provider-summary run))
+              "the history opens with the provider's block")
+          (let* ((calls (car cn))
+                 (run2 (run-ai-agent agent (%history)
+                                     :durability (%dur (task-protocol:copy-in-memory-journal
+                                                        journal)
+                                                       "pc-run"))))
+            (ok (= calls (car cn)) "replay does not ask the provider again")
+            (ok (equal (provider-summary run) (provider-summary run2))
+                "the replayed block is the provider part, not empty text")
+            (ok (equal (%turn-texts run) (%turn-texts run2)))))))))
