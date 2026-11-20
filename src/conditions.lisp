@@ -94,7 +94,14 @@ advice TOOL-FAILURE-TEXT puts in the tool result.")
 (define-condition tool-permission-denied (tool-failure)
   ((action :initarg :action :reader tool-permission-denied-action :initform nil)
    (resources :initarg :resources :reader tool-permission-denied-resources
-              :initform nil)
+              :initform nil
+              :documentation "The resources the deny came from: the ones
+denied on their own, not the call's other (allowed) resources.")
+   (call-resources :initarg :call-resources
+                   :reader tool-permission-denied-call-resources
+                   :initform nil
+                   :documentation "Every resource of the call, allowed ones
+included (TOOL-PERMISSION-RESOURCES).")
    (feedback :initarg :feedback :reader tool-permission-denied-feedback
              :initform nil
              :documentation "Text from the rule or the user saying what to do

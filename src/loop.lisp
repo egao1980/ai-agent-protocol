@@ -7,6 +7,12 @@
       llm-protocol:*llm-backend*
       (error 'agent-error :message "no llm-backend on agent or *llm-backend*")))
 
+(defun %run-model (run)
+  "Model id passed to the backend: the run settings' :model, else the running
+agent's AI-AGENT-MODEL. NIL → the backend's default model."
+  (or (agent-settings-model (agent-run-settings run))
+      (ai-agent-model (agent-run-agent run))))
+
 (defun %plist-get (plist key)
   (and (consp plist) (getf plist key)))
 
@@ -329,10 +335,12 @@ empty text, as it always did."
         nil))))
 
 (defun %after-invocations (run callback error-callback)
-  (%record-terminal-invocations run)
   (dolist (inv (agent-run-invocations run))
     (when (eq (agent-invocation-status inv) :proposed)
       (%offer-approval run inv)))
+  ;; After the approval replies: a call a handler denied is terminal now and
+  ;; needs its tool result before the next GENERATE (#27).
+  (%record-terminal-invocations run)
   (let ((pending (remove-if-not
                   (lambda (i)
                     (member (agent-invocation-status i)
@@ -514,6 +522,7 @@ empty text, as it always did."
              (handler-case
                  (stream-generate (%backend run)
                                   (agent-run-turns run)
+                                  :model (%run-model run)
                                   :settings (agent-settings-llm (agent-run-settings run))
                                   :tools (collect-run-tools (agent-run-agent run)
                                                             :extra (agent-run-extra run))
@@ -522,6 +531,7 @@ empty text, as it always did."
                (llm-unsupported ()
                  (let ((response (generate (%backend run)
                                            (agent-run-turns run)
+                                           :model (%run-model run)
                                            :settings (agent-settings-llm (agent-run-settings run))
                                            :tools (collect-run-tools (agent-run-agent run)
                                                                      :extra (agent-run-extra run))
@@ -628,7 +638,7 @@ blocking it); otherwise fail the run."
 
 (defun %compact-limit (run backend)
   (or (%extra run :compact-at)
-      (let ((window (context-window backend nil))
+      (let ((window (context-window backend (%run-model run)))
             (llm (coerce-settings (agent-settings-llm (agent-run-settings run)))))
         (and window
              (- window (or (and llm (llm-settings-max-tokens llm)) 4096))))))

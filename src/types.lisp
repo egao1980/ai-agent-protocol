@@ -4,11 +4,14 @@
   ((llm :initarg :llm :accessor agent-settings-llm :initform nil)
    (max-steps :initarg :max-steps :accessor agent-settings-max-steps :initform 20)
    (timeout :initarg :timeout :accessor agent-settings-timeout :initform nil)
-   (extra :initarg :extra :accessor agent-settings-extra :initform nil)))
+   (extra :initarg :extra :accessor agent-settings-extra :initform nil)
+   (model :initarg :model :accessor agent-settings-model :initform nil
+          :documentation "Model id for this run, passed as :model to GENERATE /
+STREAM-GENERATE; overrides AI-AGENT-MODEL. NIL → the agent's model.")))
 
-(defun make-agent-settings (&key llm (max-steps 20) timeout extra)
+(defun make-agent-settings (&key llm (max-steps 20) timeout extra model)
   (make-instance 'agent-settings :llm llm :max-steps max-steps
-                                 :timeout timeout :extra extra))
+                                 :timeout timeout :extra extra :model model))
 
 (defun agent-settings-p (x)
   (typep x 'agent-settings))
@@ -22,7 +25,8 @@
       :llm (getf x :llm)
       :max-steps (or (getf x :max-steps) 20)
       :timeout (getf x :timeout)
-      :extra (getf x :extra)))
+      :extra (getf x :extra)
+      :model (getf x :model)))
     (t (error 'agent-error :message (format nil "not agent-settings: ~s" x)))))
 
 (defclass function-tool (llm-tool)
@@ -54,6 +58,10 @@ resource strings (paths, commands) the permission rules match against.")))
 (defclass ai-agent ()
   ((name :initarg :name :accessor ai-agent-name :initform "agent")
    (backend :initarg :backend :accessor ai-agent-backend :initform nil)
+   (model :initarg :model :accessor ai-agent-model :initform nil
+          :documentation "Model id passed as :model to the backend's GENERATE /
+STREAM-GENERATE, or NIL for the backend's default model. Run settings :model
+overrides it.")
    (instructions :initarg :instructions :accessor ai-agent-instructions :initform nil)
    (tools :initarg :tools :accessor ai-agent-tools :initform nil)
    (handoffs :initarg :handoffs :accessor ai-agent-handoffs :initform nil)
@@ -72,11 +80,12 @@ settings extra :permissions are appended after them; the last match wins.")
 approvals are saved and read back, or NIL. Run settings extra
 :permission-store overrides it.")))
 
-(defun make-ai-agent (&key (name "agent") backend instructions tools handoffs settings
+(defun make-ai-agent (&key (name "agent") backend model instructions tools handoffs settings
                         memory session steering permissions permission-store)
   (make-instance 'ai-agent
                  :name name
                  :backend (or backend llm-protocol:*llm-backend*)
+                 :model model
                  :instructions instructions
                  :tools (copy-list tools)
                  :handoffs (copy-list handoffs)
