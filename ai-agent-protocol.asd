@@ -1,5 +1,5 @@
 (defsystem "ai-agent-protocol"
-  :version "0.10.0"
+  :version "0.11.0"
   :description "Async-first CLOS agent protocol over llm-protocol (CL tools, invocations, approvals)"
   :author "egao1980"
   :license "MIT"
@@ -40,7 +40,7 @@
   :in-order-to ((test-op (test-op "ai-agent-protocol/tests"))))
 
 (defsystem "ai-agent-protocol/ag-ui"
-  :version "0.2.0"
+  :version "0.3.0"
   :description "Streaming encoder from ai-agent on-event to AG-UI events"
   :author "egao1980"
   :license "MIT"
@@ -116,7 +116,8 @@
                (:file "instructions-test")
                (:file "durable-state-test")
                (:file "durable-continue-test")
-               (:file "permission-approvals-test"))
+               (:file "permission-approvals-test")
+               (:file "ag-ui-approvals-test"))
   :perform (test-op (o c)
              (unless (symbol-call :rove :run c)
                (error "tests failed for ~A" (component-name c)))))

@@ -250,3 +250,105 @@ reports its path as the resource. RAN collects the edited paths."
         (ok (= 3 (car n)) "no generate re-runs")
         (ok (= 2 (length (car ran))) "no tool re-runs")
         (ok (= 1 (length (agent-run-approved-permissions run3))))))))
+
+;;; #23: decisions taken through the restarts are journaled like
+;;; APPROVE-INVOCATION / DENY-INVOCATION, so replay restores them and the
+;;; AGENT-APPROVAL-REQUIRED handler does not run again.
+
+(defun %restart-replay (responses restart-fn)
+  "Run an edit agent on RESPONSES with a handler answering every ask through
+RESTART-FN, then replay a copy of the journal with the same handler. Each run
+gets its own permission store (run settings), so the replay cannot be answered
+by a rule the first run saved.
+→ (values first-run replayed-run asks-in-first asks-in-replay generates ran
+          first-store replay-store)."
+  (let* ((n (list 0))
+         (ran (list nil))
+         (agent (%ask-edit-agent ran responses :n n))
+         (asks 0)
+         (store (make-in-memory-permission-rule-store))
+         (replay-store (make-in-memory-permission-rule-store))
+         (journal (task-protocol:make-in-memory-journal)))
+    (flet ((run-with (j store)
+             (handler-bind ((agent-approval-required
+                              (lambda (c) (incf asks) (funcall restart-fn c))))
+               (run-ai-agent agent "go"
+                             :settings (make-agent-settings
+                                        :extra (list :permission-store store))
+                             :durability (ai-agent-protocol/durability:make-agent-durability
+                                          :journal j :task-id "restart-run")))))
+      (let* ((run (run-with journal store))
+             (first-asks asks)
+             (first-n (car n))
+             (replayed (progn (setf asks 0)
+                              (run-with (task-protocol:copy-in-memory-journal journal)
+                                        replay-store))))
+        (values run replayed first-asks asks (list first-n (car n)) ran
+                store replay-store)))))
+
+(deftest restart-decisions-replay-from-the-journal
+  (with-agent-loop
+    (testing "APPROVE restart"
+      (multiple-value-bind (run replayed asks replay-asks gens ran)
+          (%restart-replay (list (%calls-response (%edit-call "c1" "src/a.lisp"))
+                                 (%text-response "done"))
+                           #'invoke-approve)
+        (ok (eq :stop (agent-run-finish-reason run)))
+        (ok (= 1 asks))
+        (ok (eq :stop (agent-run-finish-reason replayed)))
+        (ok (= 0 replay-asks) "the handler does not run on replay")
+        (ok (= (first gens) (second gens)) "no generate re-runs")
+        (ok (= 1 (length (car ran))) "no tool re-runs")
+        (ok (eq :done (agent-invocation-status (%invocation replayed "c1"))))))
+    (testing "DENY restart with feedback"
+      (multiple-value-bind (run replayed asks replay-asks gens ran)
+          (%restart-replay (list (%calls-response (%edit-call "c1" "src/a.lisp"))
+                                 (%text-response "done"))
+                           (lambda (c) (invoke-deny c "Explain first.")))
+        (ok (= 1 asks))
+        (ok (= 0 replay-asks))
+        (ok (= (first gens) (second gens)))
+        (ok (null (car ran)))
+        (dolist (r (list run replayed))
+          (let ((inv (%invocation r "c1")))
+            (ok (eq :denied (agent-invocation-status inv)))
+            (ok (agent-invocation-error-p inv))
+            (ok (search "Explain first." (agent-invocation-result inv)))))))
+    (testing "DENY-ALL restart"
+      (multiple-value-bind (run replayed asks replay-asks)
+          (%restart-replay (list (%calls-response (%edit-call "c1" "src/a.lisp")
+                                                  (%edit-call "c2" "src/b.lisp"))
+                                 (%text-response "done"))
+                           (lambda (c) (invoke-deny-all c "Not now.")))
+        (ok (= 1 asks))
+        (ok (= 0 replay-asks))
+        (ok (eq :stop (agent-run-finish-reason replayed)))
+        (dolist (r (list run replayed))
+          (ok (every (lambda (inv)
+                       (and (eq :denied (agent-invocation-status inv))
+                            (search "Not now." (agent-invocation-result inv))))
+                     (agent-run-invocations r))))))
+    (testing "APPROVE-ALWAYS restart restores the rule, does not re-save it"
+      (multiple-value-bind (run replayed asks replay-asks gens ran store replay-store)
+          (%restart-replay (list (%calls-response (%edit-call "c1" "src/a.lisp")
+                                                  (%edit-call "c2" "src/a.lisp"))
+                                 (%calls-response (%edit-call "c3" "src/a.lisp"))
+                                 (%text-response "done"))
+                           #'invoke-approve-always)
+        (ok (eq :stop (agent-run-finish-reason run)))
+        (ok (= 1 asks))
+        (ok (= 1 (length (list-permission-rules store)))
+            "the store got the rule when the decision was made")
+        (ok (eq :stop (agent-run-finish-reason replayed)))
+        (ok (= 0 replay-asks) "the handler does not run on replay")
+        (ok (null (list-permission-rules replay-store))
+            "replay does not re-save the rule")
+        (ok (= (first gens) (second gens)))
+        (ok (= 3 (length (car ran))) "no tool re-runs")
+        (ok (equal '(("edit" "src/a.lisp" :allow))
+                   (mapcar (lambda (r)
+                             (list (permission-rule-action r)
+                                   (permission-rule-resource r)
+                                   (permission-rule-effect r)))
+                           (agent-run-approved-permissions replayed)))
+            "replay restores the always rule onto the run")))))

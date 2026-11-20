@@ -184,9 +184,15 @@
       (t nil))))
 
 (defparameter +approval-response-schema-json+
-  "{\"type\":\"object\",\"properties\":{\"approved\":{\"type\":\"boolean\"},\"editedArgs\":{\"type\":\"object\",\"description\":\"Full replacement of the tool args. Not merged.\"}},\"required\":[\"approved\"]}"
-  "Response schema offered for tool-call interrupts. The presence of editedArgs
-   is the signal to a client that it may offer approve-with-edits.")
+  "{\"type\":\"object\",\"properties\":{\"approved\":{\"type\":\"boolean\"},\"editedArgs\":{\"type\":\"object\",\"description\":\"Full replacement of the tool args. Not merged.\"},\"always\":{\"type\":\"boolean\",\"description\":\"With approved: also allow matching calls of this tool for the rest of the run, and save the rule to the agent's permission store.\"},\"rejectAll\":{\"type\":\"boolean\",\"description\":\"Reject this call and every other open tool-call interrupt of the run. The other interrupts may then be left out of the resume.\"},\"feedback\":{\"type\":\"string\",\"description\":\"With a rejection: tell the model what to do instead.\"}},\"required\":[\"approved\"]}"
+  "Response schema offered for tool-call interrupts. Each optional property
+   advertises a reply a client may offer: editedArgs approve-with-edits, always
+   approve-always (APPROVE-INVOCATION :always), rejectAll reject-all-pending
+   (DENY-INVOCATION :all), feedback a rejection message for the model.")
+
+(defparameter +approval-replies+ '("once" "always" "reject" "rejectAll")
+  "The approval replies a tool-call interrupt offers, in its metadata
+   (`replies`), named after opencode's once / always / reject.")
 
 (defun %approval-response-schema ()
   (ag-ui-protocol:decode-json +approval-response-schema-json+))
@@ -199,7 +205,9 @@
      :reason "tool_call"
      :tool-call-id id
      :message (format nil "Approve ~a?" (agent-invocation-name inv))
-     :response-schema (%approval-response-schema))))
+     :response-schema (%approval-response-schema)
+     :metadata (ag-ui-protocol:json-object
+                "replies" (coerce +approval-replies+ 'vector)))))
 
 (defun run-interrupts (run)
   "Interrupts for every invocation RUN is waiting on."
@@ -320,35 +328,87 @@
              (equal (format nil "int-~a" (agent-invocation-id inv)) interrupt-id))
            (agent-run-pending run)))
 
+(defun %payload-field (entry key)
+  "KEY of a resolved ENTRY's payload object, or NIL."
+  (let ((payload (ag-ui-protocol:event-field entry 'ag-ui-protocol::payload)))
+    (and (equal (ag-ui-protocol:resume-status entry) "resolved")
+         (hash-table-p payload)
+         (gethash key payload))))
+
+(defun %resume-always-p (entry)
+  (and (ag-ui-protocol:resume-approved-p entry)
+       (%payload-field entry "always")))
+
+(defun %resume-reject-all-p (entry)
+  (and (%payload-field entry "rejectAll") t))
+
+(defun %resume-feedback (entry)
+  (let ((feedback (%payload-field entry "feedback")))
+    (and (stringp feedback) (plusp (length feedback)) feedback)))
+
+(defun %deny-from-entry (run inv entry &key all)
+  (deny-invocation
+   run inv
+   :reason (if (equal (ag-ui-protocol:resume-status entry) "cancelled")
+               "cancelled"
+               "denied")
+   :feedback (%resume-feedback entry)
+   :all all))
+
 (defun apply-resume (run input)
   "Apply INPUT's resume entries to RUN's pending invocations.
 
    Validates against the interrupts RUN actually has open first, so a resume
    that violates the contract signals AG-UI-RESUME-ERROR rather than half
-   applying. Returns the number of invocations decided."
-  (let ((interrupts (run-interrupts run))
-        (entries (coerce (or (ag-ui-protocol:event-field input 'ag-ui-protocol::resume)
-                             #())
-                         'list))
-        (decided 0))
-    (ag-ui-protocol:validate-resume interrupts entries)
-    (dolist (entry entries decided)
-      (let ((inv (%invocation-for-interrupt
-                  run (ag-ui-protocol:resume-interrupt-id entry))))
-        (when inv
-          (incf decided)
-          (if (ag-ui-protocol:resume-approved-p entry)
-              (let ((edited (ag-ui-protocol:resume-edited-args entry)))
-                ;; editedArgs fully replaces the proposed arguments.
-                (when edited
-                  (setf (agent-invocation-arguments inv)
-                        (ag-ui-protocol:encode-json edited)))
-                (approve-invocation run inv))
-              (deny-invocation
-               run inv
-               :reason (if (equal (ag-ui-protocol:resume-status entry) "cancelled")
-                           "cancelled"
-                           "denied"))))))))
+   applying. Returns the number of invocations decided.
+
+   Payload replies (advertised by INVOCATION-INTERRUPT's responseSchema):
+   `approved` approves once; with `always` it is APPROVE-INVOCATION :always
+   (matching calls are allowed for the rest of the run and the rule is saved to
+   the permission store); `feedback` goes to the model with a rejection.
+   `rejectAll` on any entry is DENY-INVOCATION :all: every open tool-call
+   interrupt is rejected with that entry's feedback, whatever the other entries
+   say, and the others may be left out of the resume. Always replies are
+   applied after the other entries, so an explicit answer for a call is never
+   overridden by another call's always rule."
+  (let* ((interrupts (run-interrupts run))
+         (entries (coerce (or (ag-ui-protocol:event-field input 'ag-ui-protocol::resume)
+                              #())
+                          'list))
+         (reject-all (find-if #'%resume-reject-all-p entries))
+         (decided 0))
+    (flet ((inv-of (entry)
+             (%invocation-for-interrupt run (ag-ui-protocol:resume-interrupt-id entry))))
+      (cond
+        (reject-all
+         ;; Only the answered interrupts are checked: reject-all answers the rest.
+         (ag-ui-protocol:validate-resume
+          (remove-if-not (lambda (int)
+                           (find (ag-ui-protocol:interrupt-id int) entries
+                                 :key #'ag-ui-protocol:resume-interrupt-id
+                                 :test #'equal))
+                         interrupts)
+          entries)
+         (let ((inv (inv-of reject-all)))
+           (when inv
+             (setf decided (length interrupts))
+             (%deny-from-entry run inv reject-all :all t))))
+        (t
+         (ag-ui-protocol:validate-resume interrupts entries)
+         (dolist (entry (append (remove-if #'%resume-always-p entries)
+                                (remove-if-not #'%resume-always-p entries)))
+           (let ((inv (inv-of entry)))
+             (when inv
+               (incf decided)
+               (if (ag-ui-protocol:resume-approved-p entry)
+                   (let ((edited (ag-ui-protocol:resume-edited-args entry)))
+                     ;; editedArgs fully replaces the proposed arguments.
+                     (when edited
+                       (setf (agent-invocation-arguments inv)
+                             (ag-ui-protocol:encode-json edited)))
+                     (approve-invocation run inv :always (%resume-always-p entry)))
+                   (%deny-from-entry run inv entry))))))))
+    decided))
 
 (defun resume-ag-ui-agent-run (run input &key on-event)
   "Answer RUN's open interrupts from INPUT and continue it, encoding AG-UI
