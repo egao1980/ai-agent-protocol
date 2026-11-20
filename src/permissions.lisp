@@ -334,24 +334,50 @@ ones the deciding RULE matches; failing that, all of them."
       (setf (agent-run-approved-permissions run)
             (append (agent-run-approved-permissions run) (list rule))))))
 
-(defun %remember-approval (run inv)
-  "The \"always\" reply for INV: one :allow rule per
-TOOL-PERMISSION-ALWAYS-RESOURCES, added to the run and saved in its store.
-→ the rules."
-  (let* ((name (agent-invocation-name inv))
-         (rules (mapcar (lambda (resource) (make-permission-rule name resource :allow))
-                        (remove-duplicates
-                         (tool-permission-always-resources
-                          (agent-invocation-source inv) name
-                          (agent-invocation-arguments inv)
-                          :context (%permission-context run))
-                         :test #'equal)))
-         (store (%run-permission-store run)))
+(defun %always-rules (run inv)
+  "The \"always\" reply's rules for INV: one :allow rule per
+TOOL-PERMISSION-ALWAYS-RESOURCES."
+  (let ((name (agent-invocation-name inv)))
+    (mapcar (lambda (resource) (make-permission-rule name resource :allow))
+            (remove-duplicates
+             (tool-permission-always-resources
+              (agent-invocation-source inv) name
+              (agent-invocation-arguments inv)
+              :context (%permission-context run))
+             :test #'equal))))
+
+(defun %remember-approval (run inv rules)
+  "Add the \"always\" RULES of INV to RUN and save them in its store. INV is
+already approved, so a store that signals cannot leave it :proposed (#29).
+Around each save: SKIP-SAVE (keep the rule for this run only); around all of
+them: APPROVE-ONCE (drop the rules: INV stays approved, once). → the rules
+kept (NIL after APPROVE-ONCE)."
+  (let ((added (remove-if (lambda (r)
+                            (find r (agent-run-approved-permissions run)
+                                  :test #'%same-rule-p))
+                          rules))
+        (store (%run-permission-store run)))
     (%add-approved-permissions run rules)
-    (dolist (rule rules)
-      (save-permission-rule store rule :agent (agent-run-agent run)))
-    (%emit run :permission (list :invocation inv :rules rules))
-    rules))
+    (restart-case
+        (progn
+          (dolist (rule rules)
+            (restart-case
+                (handler-bind ((error (lambda (c)
+                                        (signal 'agent-permission-save-error
+                                                :run run :invocation inv
+                                                :rule rule :cause c))))
+                  (save-permission-rule store rule :agent (agent-run-agent run)))
+              (skip-save ()
+                :report "Keep the rule for this run only; do not save it"
+                nil)))
+          (%emit run :permission (list :invocation inv :rules rules))
+          rules)
+      (approve-once ()
+        :report "Approve this call once; drop its \"always\" rules"
+        (setf (agent-run-approved-permissions run)
+              (remove-if (lambda (r) (member r added :test #'eq))
+                         (agent-run-approved-permissions run)))
+        nil))))
 
 (defun %proposed-invocations (run)
   "RUN's invocations still waiting for an approval reply."
@@ -398,8 +424,8 @@ model gets TOOL-FAILURE-TEXT as an error result."
     (%emit run :permission (list :invocation inv :condition condition)))
   inv)
 
-(defun %rejection (inv feedback)
+(defun %rejection (inv feedback &optional (by :user))
   (make-condition 'tool-permission-denied
-                  :decision :rejected
+                  :decision (denial-decision by)
                   :action (agent-invocation-name inv)
                   :feedback feedback))

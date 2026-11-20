@@ -329,27 +329,36 @@ reply) also allow matching calls for the rest of RUN: one :allow rule per
 TOOL-PERMISSION-ALWAYS-RESOURCES goes on AGENT-RUN-APPROVED-PERMISSIONS and
 through SAVE-PERMISSION-RULE into the run's PERMISSION-RULE-STORE, and every
 other pending invocation those rules now allow is approved too. The rules only
-answer asks: a deny rule or a policy still wins."
-  (let ((rules (and always (%remember-approval run invocation))))
+answer asks: a deny rule or a policy still wins.
+
+INVOCATION is approved before the rules are saved: when SAVE-PERMISSION-RULE
+signals, it stays approved (the rules still hold for RUN), and the restarts
+SKIP-SAVE (per rule) and APPROVE-ONCE (drop the rules) are available."
+  (let ((rules (and always (%always-rules run invocation))))
     (setf (agent-invocation-status invocation) :approved)
     (setf (agent-run-pending run)
           (remove invocation (agent-run-pending run)))
-    (%journal-approval run invocation rules)
-    (%emit run :invocation invocation)
+    (unwind-protect
+         (when rules
+           (setf rules (%remember-approval run invocation rules)))
+      (%journal-approval run invocation rules)
+      (%emit run :invocation invocation))
     (when rules
       (dolist (other (%proposed-invocations run))
         (when (%now-allowed-p run other)
           (approve-invocation run other)))))
   run)
 
-(defun deny-invocation (run invocation &key reason feedback all)
+(defun deny-invocation (run invocation &key reason feedback all (by :user))
   "Reject a :proposed INVOCATION. With FEEDBACK the model gets a
 TOOL-PERMISSION-DENIED error result carrying it (what to do instead);
-otherwise the result is REASON (default \"denied\"). With ALL (opencode's
+otherwise the result is REASON (default \"denied\"). BY says who decided
+(DENIAL-DECISION): :USER (default), :POLICY or :UNATTENDED; any but :USER
+always gives a TOOL-PERMISSION-DENIED result. With ALL (opencode's
 \"a rejection rejects every pending request\") every other :proposed
 invocation of RUN is rejected the same way."
-  (if feedback
-      (%refuse-invocation nil invocation (%rejection invocation feedback))
+  (if (or feedback (not (eq by :user)))
+      (%refuse-invocation nil invocation (%rejection invocation feedback by))
       (setf (agent-invocation-status invocation) :denied
             (agent-invocation-result invocation) (or reason "denied")
             (agent-invocation-error-p invocation) nil))
@@ -359,7 +368,7 @@ invocation of RUN is rejected the same way."
   (%emit run :invocation invocation)
   (when all
     (dolist (other (%proposed-invocations run))
-      (deny-invocation run other :reason reason :feedback feedback)))
+      (deny-invocation run other :reason reason :feedback feedback :by by)))
   run)
 
 (defun complete-invocation (run invocation result &key error-p)

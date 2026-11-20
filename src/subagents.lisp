@@ -195,11 +195,16 @@ return its SUBAGENT-TASK. The child's report lands in PARENT's inbox."
   "Continue a finished (non-paused) RUN with a follow-up user MESSAGE (string
 or LLM-TURN): the step count restarts and the loop runs to the next finish.
 Each continuation opens a new journal segment (AGENT-RUN-SEGMENT), so its
-steps never replay the earlier segments' records."
+steps never replay the earlier segments' records.
+
+Continuing is a fresh turn: a cancel of the previous one (CANCEL-AGENT-RUN)
+is cleared, and so is any assistant turn it left in flight (#29)."
   (when (member (agent-run-finish-reason run) '(:approval :deferred) :test #'eq)
     (error 'agent-error :run run
                         :message "run is paused for approval; resume it instead"))
   (%event-context)
+  (setf (agent-run-handle-canceled-p (agent-run-handle run)) nil)
+  (%settle-in-flight run)
   (setf (agent-run-finish-reason run) nil
         (agent-run-step run) 0
         (agent-run-segment run) (1+ (agent-run-segment run))
