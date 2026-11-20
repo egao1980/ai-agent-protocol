@@ -389,7 +389,7 @@ invocation of RUN is rejected the same way."
 (defmacro defagent (name superclasses &body body)
   "Define an AI-AGENT subclass. Options: (:name \"x\") (:instructions \"…\")
    (:settings form) (:tools form) (:handoffs form) (:memory form) (:session form)
-   (:steering form) (:permissions form) (:permission-store form).
+   (:steering form) (:permissions form) (:permission-store form) (:model form).
    Slot forms like DEFCLASS.
    (defagent researcher ()
      \"Looks things up.\"
@@ -413,7 +413,8 @@ invocation of RUN is rejected the same way."
           (:steering (setf initargs (list* :steering (second opt) initargs)))
           (:permissions (setf initargs (list* :permissions (second opt) initargs)))
           (:permission-store
-           (setf initargs (list* :permission-store (second opt) initargs)))))
+           (setf initargs (list* :permission-store (second opt) initargs)))
+          (:model (setf initargs (list* :model (second opt) initargs)))))
       `(progn
          (defclass ,name ,supers
            ,slots

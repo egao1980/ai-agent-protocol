@@ -1,6 +1,6 @@
 # ai-agent-protocol
 
-Version **0.11.0**.
+Version **0.12.0**.
 
 Async-first CLOS **agent loop** over [`llm-protocol`](https://github.com/egao1980/llm-protocol). Not blackboard core. Not AG-UI `run-agent` — that's `ag-ui-protocol:run-agent`. Use `run-ai-agent` / `run-ai-agent-async`.
 
@@ -68,6 +68,8 @@ Since 0.7 the journal also carries the long-run state, as more `step-completed` 
   (run-ai-agent agent "go" :durability dur))
 ```
 
+- **Model.** `make-ai-agent :model "id"` (`defagent` `(:model …)`, reader `ai-agent-model`) is passed as `:model` to `generate` / `stream-generate` (and `context-window`); run settings `:model` (`make-agent-settings :model`, plist `(:model "id")`, reader `agent-settings-model`) overrides it per run. NIL → the backend's default model. Two agents on one backend can use different models.
+
 ```lisp
 (make-ai-agent :name "echo" :backend backend
                :memory (stack-conversation:make-window-memory :window-size 8)
@@ -104,7 +106,7 @@ Modelled on [opencode v2 permissions](https://opencode.ai/v2/permissions.md). A 
 - **Layers, last match wins.** `make-ai-agent :permissions` (agent layer), then settings `:extra :permissions` (run layer). Rules may be objects (`make-permission-rule action resource effect :feedback text`) or lists `("bash" "git *" :allow)`. For each resource the last matching rule decides; across resources a deny wins, then an ask. No rule decides → the tool's own default (`tool-needs-approval-p` → `:ask`, else `:allow`).
 - **Policy tightens only.** Settings `:extra :permission-policy` and the global `*permission-policy*` (a rule list, or `(lambda (action resources effect))`) may turn allow into ask or deny, and ask into deny; an `:allow` from a policy changes nothing. `permission-policy-effect` is the GF to specialize for other policy objects.
 - **Wiring.** `agent-permission` → `(values effect rule resources)`. `agent-approve-p`'s default is now "effect is `:ask`", so `:ask` is the existing approval pause (`agent-approval-required`, `approve-invocation` / `deny-invocation`, `resume-ai-agent`).
-- **Deny is a tool result, not an abort.** A denied call is not run; its invocation is `:denied` with `error-p` and a `tool-permission-denied` (`tool-failure` subtype, kind `:denied`) text: what was refused, the rule's `:feedback`, "do not repeat the same call". Rejecting an ask with feedback does the same: `(deny-invocation run inv :feedback "Use src/ instead")` or `(invoke-deny condition "…")` from a handler. Without feedback a rejection keeps the old `"denied"` result. Event `:permission` `(:invocation inv :condition c)`.
+- **Deny is a tool result, not an abort.** A denied call is not run; its invocation is `:denied` with `error-p` and a `tool-permission-denied` (`tool-failure` subtype, kind `:denied`) text: what was refused, the rule's `:feedback`, "do not repeat the same call". Rejecting an ask with feedback does the same: `(deny-invocation run inv :feedback "Use src/ instead")` or `(invoke-deny condition "…")` from a handler. Without feedback a rejection keeps the old `"denied"` result. The result is written to the conversation before the next generate, whether the call was denied by a rule, by a handler (`invoke-deny` / `invoke-deny-all`) or by `deny-invocation` + resume. `tool-permission-denied-resources` (and the text) name only the resources denied on their own (`bash ls && rm x` → `program:rm`, not `program:ls`); `tool-permission-denied-call-resources` keeps every resource of the call. Event `:permission` `(:invocation inv :condition c)`.
 
 ```lisp
 (make-ai-agent :name "coder" :backend backend

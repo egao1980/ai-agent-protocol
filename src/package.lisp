@@ -29,6 +29,7 @@
    #:tool-permission-denied
    #:tool-permission-denied-action
    #:tool-permission-denied-resources
+   #:tool-permission-denied-call-resources
    #:tool-permission-denied-feedback
    #:tool-permission-denied-rule
    #:tool-permission-denied-decision
@@ -116,6 +117,7 @@
    #:ai-agent-tools
    #:ai-agent-handoffs
    #:ai-agent-settings
+   #:ai-agent-model
    #:ai-agent-name
    #:ai-agent-memory
    #:ai-agent-session
@@ -133,6 +135,7 @@
    #:agent-settings-max-steps
    #:agent-settings-timeout
    #:agent-settings-extra
+   #:agent-settings-model
    #:coerce-agent-settings
 
    #:function-tool

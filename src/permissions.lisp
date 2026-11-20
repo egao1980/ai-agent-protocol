@@ -262,32 +262,55 @@ AI-AGENT-PERMISSION-STORE) and CONTEXT :approved-permissions (this run's
 \"always\" replies), appended last; they never turn a deny into an allow.
 Then CONTEXT :permission-policy and *PERMISSION-POLICY* may tighten it.")
   (:method ((agent ai-agent) source name arguments &key context)
-    (let* ((resources (tool-permission-resources source name arguments
-                                                 :context context))
-           (rules (append (ai-agent-permissions agent)
-                          (coerce-permission-rules
-                           (%context-get context :permissions)))))
+    (let ((resources (tool-permission-resources source name arguments
+                                                :context context)))
       (multiple-value-bind (effect rule)
-          (permission-rules-effect rules name resources)
-        (unless effect
-          (setf effect (if (tool-needs-approval-p source name arguments
-                                                  :context context)
-                           :ask
-                           :allow)))
-        (when (eq effect :ask)
-          (let ((approved (%approved-rules agent context)))
-            (when approved
-              (multiple-value-bind (answer answer-rule)
-                  (permission-rules-effect (append rules approved) name resources)
-                (when (member answer '(:allow :deny))
-                  (setf effect answer rule answer-rule))))))
-        (dolist (policy (list (%context-get context :permission-policy)
-                              *permission-policy*))
-          (multiple-value-bind (tight tight-rule)
-              (permission-policy-effect policy name resources effect)
-            (when (and tight (> (%effect-rank tight) (%effect-rank effect)))
-              (setf effect tight rule tight-rule))))
+          (%resources-effect agent source name arguments resources context)
         (values effect rule resources)))))
+
+(defun %resources-effect (agent source name arguments resources context)
+  "→ (values EFFECT RULE) of AGENT's rule layers and policies for a call of
+NAME touching RESOURCES (see AGENT-PERMISSION)."
+  (let ((rules (append (ai-agent-permissions agent)
+                       (coerce-permission-rules
+                        (%context-get context :permissions)))))
+    (multiple-value-bind (effect rule)
+        (permission-rules-effect rules name resources)
+      (unless effect
+        (setf effect (if (tool-needs-approval-p source name arguments
+                                                :context context)
+                         :ask
+                         :allow)))
+      (when (eq effect :ask)
+        (let ((approved (%approved-rules agent context)))
+          (when approved
+            (multiple-value-bind (answer answer-rule)
+                (permission-rules-effect (append rules approved) name resources)
+              (when (member answer '(:allow :deny))
+                (setf effect answer rule answer-rule))))))
+      (dolist (policy (list (%context-get context :permission-policy)
+                            *permission-policy*))
+        (multiple-value-bind (tight tight-rule)
+            (permission-policy-effect policy name resources effect)
+          (when (and tight (> (%effect-rank tight) (%effect-rank effect)))
+            (setf effect tight rule tight-rule))))
+      (values effect rule))))
+
+(defun %denied-resources (agent source name arguments resources rule context)
+  "The RESOURCES of a denied call that are denied on their own (#26): each
+is re-checked alone. When none is (a policy denied the combination), the
+ones the deciding RULE matches; failing that, all of them."
+  (if (and (typep agent 'ai-agent) (rest resources))
+      (or (remove-if-not
+           (lambda (r)
+             (eq :deny (%resources-effect agent source name arguments
+                                          (list r) context)))
+           resources)
+          (and (permission-rule-p rule)
+               (remove-if-not (lambda (r) (permission-rule-matches-p rule name r))
+                              resources))
+          resources)
+      resources))
 
 (defun %permission-context (run)
   (list :run run
@@ -353,7 +376,13 @@ deny it; the model gets a TOOL-PERMISSION-DENIED result."
       (%refuse-invocation run inv
                           (make-condition 'tool-permission-denied
                                           :action (agent-invocation-name inv)
-                                          :resources resources
+                                          :resources (%denied-resources
+                                                      (agent-run-agent run) source
+                                                      (agent-invocation-name inv)
+                                                      (agent-invocation-arguments inv)
+                                                      resources rule
+                                                      (%permission-context run))
+                                          :call-resources resources
                                           :rule rule
                                           :feedback (and rule (permission-rule-feedback rule))))
       t)))
