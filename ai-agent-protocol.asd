@@ -1,5 +1,5 @@
 (defsystem "ai-agent-protocol"
-  :version "0.13.0"
+  :version "0.14.0"
   :description "Async-first CLOS agent protocol over llm-protocol (CL tools, invocations, approvals)"
   :author "egao1980"
   :license "MIT"
@@ -119,7 +119,8 @@
                (:file "permission-approvals-test")
                (:file "ag-ui-approvals-test")
                (:file "denial-model-test")
-               (:file "cancel-continue-test"))
+               (:file "cancel-continue-test")
+               (:file "denied-steering-test"))
   :perform (test-op (o c)
              (unless (symbol-call :rove :run c)
                (error "tests failed for ~A" (component-name c)))))
