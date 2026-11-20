@@ -102,6 +102,13 @@
    #:invoke-deny
    #:invoke-approve-always
    #:invoke-deny-all
+   #:agent-permission-save-error
+   #:agent-permission-save-error-invocation
+   #:agent-permission-save-error-rule
+   #:agent-permission-save-error-cause
+   #:invoke-skip-save
+   #:invoke-approve-once
+   #:denial-decision
    #:invoke-pause-for-approval
    #:auto-skip-tool
    #:auto-pause-approval

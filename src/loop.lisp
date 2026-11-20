@@ -118,8 +118,23 @@ empty text, as it always did."
                    :report "Finish the run as canceled"
                    (progn :finish)))))
       (when (eq act :finish)
+        (%settle-in-flight run)
         (%finish run :canceled callback)
         t))))
+
+(defun %settle-in-flight (run)
+  "A cancel ends the step: the partial assistant turn stays in history as
+what the user saw, minus its tool calls (they get no results), and is no
+longer in flight, so the next step opens its own turn (#29). A turn left
+with no parts is dropped."
+  (let ((turn (agent-run-in-flight-turn run)))
+    (when turn
+      (setf (agent-run-in-flight-turn run) nil
+            (llm-turn-parts turn)
+            (remove-if #'llm-tool-call-part-p (llm-turn-parts turn)))
+      (unless (llm-turn-parts turn)
+        (setf (agent-run-turns run)
+              (remove turn (agent-run-turns run) :test #'eq))))))
 
 (defun %handoff-for (run name)
   (find name (ai-agent-handoffs (agent-run-agent run))
@@ -294,9 +309,9 @@ empty text, as it always did."
   (let ((line (read-line *query-io*)))
     (and (plusp (length line)) (list line))))
 
-(defun %deny-offered (run inv feedback)
-  (if feedback
-      (%refuse-invocation run inv (%rejection inv feedback))
+(defun %deny-offered (run inv feedback &optional (by :user))
+  (if (or feedback (not (eq by :user)))
+      (%refuse-invocation run inv (%rejection inv feedback by))
       (setf (agent-invocation-status inv) :denied
             (agent-invocation-result inv) "denied"
             (agent-invocation-error-p inv) nil))
@@ -317,19 +332,24 @@ empty text, as it always did."
         (%approve-offered run inv))
       (approve-always ()
         :report "Approve it and allow matching calls for the rest of the run"
-        (%approve-offered run inv (%remember-approval run inv))
-        (dolist (other (%proposed-invocations run))
-          (when (%now-allowed-p run other)
-            (%approve-offered run other))))
-      (deny (&optional feedback)
+        (let ((rules (%always-rules run inv)))
+          (setf (agent-invocation-status inv) :approved)
+          (unwind-protect
+               (setf rules (%remember-approval run inv rules))
+            (%approve-offered run inv rules))
+          (when rules
+            (dolist (other (%proposed-invocations run))
+              (when (%now-allowed-p run other)
+                (%approve-offered run other))))))
+      (deny (&optional feedback &key (by :user))
         :report "Deny the tool invocation"
         :interactive %read-approval-feedback
-        (%deny-offered run inv feedback))
-      (deny-all (&optional feedback)
+        (%deny-offered run inv feedback by))
+      (deny-all (&optional feedback &key (by :user))
         :report "Deny it and every other pending invocation of the run"
         :interactive %read-approval-feedback
         (dolist (i (%proposed-invocations run))
-          (%deny-offered run i feedback)))
+          (%deny-offered run i feedback by)))
       (pause-for-approval ()
         :report "Pause the run for HITL approval"
         nil))))

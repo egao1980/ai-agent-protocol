@@ -61,6 +61,21 @@
   (:report (lambda (c s)
              (format s "agent hit max steps~@[: ~a~]" (agent-error-message c)))))
 
+(define-condition agent-permission-save-error (agent-condition)
+  ((invocation :initarg :invocation :reader agent-permission-save-error-invocation
+               :initform nil)
+   (rule :initarg :rule :reader agent-permission-save-error-rule :initform nil)
+   (cause :initarg :cause :reader agent-permission-save-error-cause :initform nil))
+  (:documentation "SIGNALed when SAVE-PERMISSION-RULE fails for an \"always\"
+reply, before the store's error goes on. The invocation is already approved.
+Restarts: SKIP-SAVE (INVOKE-SKIP-SAVE: keep the rule for this run only) and
+APPROVE-ONCE (INVOKE-APPROVE-ONCE: drop the rules). Not an ERROR, so it
+reaches handlers outside the event loop's own error handling.")
+  (:report (lambda (c s)
+             (format s "could not save the permission rule~@[ ~a~]~@[: ~a~]"
+                     (agent-permission-save-error-rule c)
+                     (agent-permission-save-error-cause c)))))
+
 (define-condition agent-approval-required (agent-condition)
   ((invocation :initarg :invocation :reader agent-approval-required-invocation
                :initform nil))
@@ -109,13 +124,18 @@ instead; NIL when none was given.")
    (rule :initarg :rule :reader tool-permission-denied-rule :initform nil)
    (decision :initarg :decision :reader tool-permission-denied-decision
              :initform :deny
-             :documentation ":DENY (a rule or policy) or :REJECTED (an ask
-the user turned down)."))
-  (:documentation "The call was not run: a permission rule denied it, or the
-user rejected the approval request. Becomes a tool result, not a run abort.")
+             :documentation "Who decided: :DENY (a rule or policy), :REJECTED
+(a person turned the ask down) or :UNATTENDED (nobody could be asked, e.g. a
+headless run, so the program denied it). See DENIAL-DECISION."))
+  (:documentation "The call was not run: a permission rule or policy denied
+it, the user rejected the approval request, or no one could be asked. Becomes
+a tool result, not a run abort.")
   (:report (lambda (c s)
-             (format s "~:[permission denied~;the user rejected the request~]~@[ for ~{~a~^, ~}~]~@[~%Feedback: ~a~]"
-                     (eq (tool-permission-denied-decision c) :rejected)
+             (format s "~a~@[ for ~{~a~^, ~}~]~@[~%Feedback: ~a~]"
+                     (case (tool-permission-denied-decision c)
+                       (:rejected "the user rejected the request")
+                       (:unattended "approval is not available (no one can be asked)")
+                       (t "permission denied"))
                      (remove "*" (tool-permission-denied-resources c)
                              :test #'equal)
                      (tool-permission-denied-feedback c)))))
@@ -189,14 +209,26 @@ CONDITION: what went wrong plus what to do next, by TOOL-FAILURE-KIND.")
   (let ((r (find-restart 'approve condition)))
     (when r (invoke-restart r))))
 
-(defun invoke-deny (&optional condition feedback)
+(defun denial-decision (by)
+  "The TOOL-PERMISSION-DENIED-DECISION for a denial made BY :USER (a person
+answered: :REJECTED), :POLICY (a rule, hook or policy of the program: :DENY)
+or :UNATTENDED (no one could be asked, e.g. a headless run or a timeout:
+:UNATTENDED)."
+  (ecase by
+    (:user :rejected)
+    (:policy :deny)
+    (:unattended :unattended)))
+
+(defun invoke-deny (&optional condition feedback &key (by :user))
   "Invoke DENY. With FEEDBACK the model gets a TOOL-PERMISSION-DENIED result
-carrying that text (what to do instead)."
+carrying that text (what to do instead). BY says who decided (DENIAL-DECISION):
+:USER (default, \"the user rejected the request\"), :POLICY or :UNATTENDED
+(a program denying because no one can be asked)."
   (let ((r (find-restart 'deny condition)))
     (when r
-      (if feedback
-          (invoke-restart r feedback)
-          (invoke-restart r)))))
+      (cond ((not (eq by :user)) (invoke-restart r feedback :by by))
+            (feedback (invoke-restart r feedback))
+            (t (invoke-restart r))))))
 
 (defun invoke-approve-always (&optional condition)
   "Invoke APPROVE-ALWAYS: approve, and allow matching calls for the rest of the
@@ -204,14 +236,27 @@ run (see APPROVE-INVOCATION :always)."
   (let ((r (find-restart 'approve-always condition)))
     (when r (invoke-restart r))))
 
-(defun invoke-deny-all (&optional condition feedback)
+(defun invoke-deny-all (&optional condition feedback &key (by :user))
   "Invoke DENY-ALL: deny this and every other pending invocation of the run,
-each with FEEDBACK when given (see DENY-INVOCATION :all)."
+each with FEEDBACK when given (see DENY-INVOCATION :all). BY as for
+INVOKE-DENY."
   (let ((r (find-restart 'deny-all condition)))
     (when r
-      (if feedback
-          (invoke-restart r feedback)
-          (invoke-restart r)))))
+      (cond ((not (eq by :user)) (invoke-restart r feedback :by by))
+            (feedback (invoke-restart r feedback))
+            (t (invoke-restart r))))))
+
+(defun invoke-skip-save (&optional condition)
+  "Invoke SKIP-SAVE: an \"always\" rule could not be saved to the permission
+store; keep it for this run only."
+  (let ((r (find-restart 'skip-save condition)))
+    (when r (invoke-restart r))))
+
+(defun invoke-approve-once (&optional condition)
+  "Invoke APPROVE-ONCE: an \"always\" rule could not be saved; approve the
+call once and drop its rules."
+  (let ((r (find-restart 'approve-once condition)))
+    (when r (invoke-restart r))))
 
 (defun invoke-pause-for-approval (&optional condition)
   (let ((r (find-restart 'pause-for-approval condition)))
