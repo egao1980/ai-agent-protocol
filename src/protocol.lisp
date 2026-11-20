@@ -232,8 +232,38 @@ new segment, keyed \"cN/BASE\" (#16)."
 (defun %durable-hitl-key (run invocation)
   (%segment-key run (format nil "hitl/~a" (agent-invocation-id invocation))))
 
+(defun %journal-approval (run inv &optional rules)
+  "Journal an approval of INV (with the \"always\" RULES it added) under its
+hitl key. Every approval path calls this: APPROVE-INVOCATION and the APPROVE /
+APPROVE-ALWAYS restarts, so replay restores the decision instead of asking (or
+running the handler) again."
+  (%durable-record-step run "hitl"
+                        (list* :decision :approved
+                               (and rules
+                                    (list :rules (mapcar #'%rule-list rules))))
+                        :idempotency-key (%durable-hitl-key run inv)))
+
+(defun %journal-denial (run inv)
+  "Journal the denial already set on INV (result, error-p) under its hitl key.
+Called by DENY-INVOCATION and the DENY / DENY-ALL restarts."
+  (%durable-record-step run "hitl"
+                        (list :decision :denied
+                              :reason (agent-invocation-result inv)
+                              :error-p (agent-invocation-error-p inv))
+                        :idempotency-key (%durable-hitl-key run inv)))
+
 (defun %apply-journaled-hitl (run inv)
-  "If approve/deny was journaled, restore it onto INV."
+  "If approve/deny was journaled, restore it onto INV.
+
+The decision may have come from APPROVE-INVOCATION / DENY-INVOCATION or from a
+restart (APPROVE, APPROVE-ALWAYS, DENY, DENY-ALL); either way the recorded
+decision is restored and AGENT-APPROVAL-REQUIRED is not signaled again.
+
+\"Always\" rules are restored onto the run (AGENT-RUN-APPROVED-PERMISSIONS) but
+not re-saved to the PERMISSION-RULE-STORE: SAVE-PERMISSION-RULE ran when the
+decision was made, before the decision was journaled, so a journaled always
+reply implies the store already got its rules. Re-saving would write a store
+the product may have edited since (a rule the user revoked would come back)."
   (when (eq (agent-invocation-status inv) :proposed)
     (multiple-value-bind (hit result)
         (%durable-step-replayed run "hitl"
@@ -304,11 +334,7 @@ answer asks: a deny rule or a policy still wins."
     (setf (agent-invocation-status invocation) :approved)
     (setf (agent-run-pending run)
           (remove invocation (agent-run-pending run)))
-    (%durable-record-step run "hitl"
-                          (list* :decision :approved
-                                 (and rules
-                                      (list :rules (mapcar #'%rule-list rules))))
-                          :idempotency-key (%durable-hitl-key run invocation))
+    (%journal-approval run invocation rules)
     (%emit run :invocation invocation)
     (when rules
       (dolist (other (%proposed-invocations run))
@@ -329,11 +355,7 @@ invocation of RUN is rejected the same way."
             (agent-invocation-error-p invocation) nil))
   (setf (agent-run-pending run)
         (remove invocation (agent-run-pending run)))
-  (%durable-record-step run "hitl"
-                        (list :decision :denied
-                              :reason (agent-invocation-result invocation)
-                              :error-p (agent-invocation-error-p invocation))
-                        :idempotency-key (%durable-hitl-key run invocation))
+  (%journal-denial run invocation)
   (%emit run :invocation invocation)
   (when all
     (dolist (other (%proposed-invocations run))

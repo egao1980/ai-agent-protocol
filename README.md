@@ -1,6 +1,6 @@
 # ai-agent-protocol
 
-Version **0.10.0**.
+Version **0.11.0**.
 
 Async-first CLOS **agent loop** over [`llm-protocol`](https://github.com/egao1980/llm-protocol). Not blackboard core. Not AG-UI `run-agent` — that's `ag-ui-protocol:run-agent`. Use `run-ai-agent` / `run-ai-agent-async`.
 
@@ -123,6 +123,8 @@ Modelled on [opencode v2 permissions](https://opencode.ai/v2/permissions.md). A 
 - **Rule store.** `permission-rule-store` with GFs `save-permission-rule (store rule &key agent)` and `list-permission-rules (store &key agent)`; `make-in-memory-permission-rule-store :rules …` is the default implementation. Set it with `make-ai-agent :permission-store` (or `defagent` `(:permission-store …)`); settings `:extra :permission-store` overrides it per run. A product specializes the GFs to persist saved rules as project rules; later runs with the same store read them back.
 - **Saved rules only answer asks.** Store rules and the run's always rules are consulted only when the layers above decide `:ask`; a deny from any rule layer still wins, and the policy still tightens afterwards (a policy `:ask` keeps asking).
 - **Reject.** `(deny-invocation run inv :feedback "…")` rejects one call; `:all t` rejects every other pending call of the run the same way (opencode's "a rejection rejects every pending request"). From a handler: `(invoke-deny-all c "…")`.
+- **Durable, whichever path decided.** The restarts (`invoke-approve`, `invoke-approve-always`, `invoke-deny`, `invoke-deny-all`) journal their decision under the call's hitl key exactly like `approve-invocation` / `deny-invocation`, so a durable replay restores it and the `agent-approval-required` handler does not run again. Replay puts journaled always rules back on the run but does not re-save them to the store: `save-permission-rule` ran when the decision was made, before it was journaled, and re-saving could bring back a rule the product has since removed.
+- **AG-UI.** `ai-agent-protocol/ag-ui` tool-call interrupts advertise the replies in their `responseSchema` (`approved`, `editedArgs`, `always`, `rejectAll`, `feedback`) and in `metadata.replies` (`["once","always","reject","rejectAll"]`). `apply-resume` maps `{"approved":true,"always":true}` to `approve-invocation :always t`, `feedback` on a rejection to `deny-invocation :feedback`, and `{"rejectAll":true}` on any entry to `deny-invocation :all t`: every open interrupt is rejected (the others may be left out of the resume). Always replies are applied after the other entries, so they never override an explicit answer.
 
 ```lisp
 (let ((store (make-in-memory-permission-rule-store)))

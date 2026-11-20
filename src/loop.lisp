@@ -294,6 +294,12 @@ empty text, as it always did."
       (setf (agent-invocation-status inv) :denied
             (agent-invocation-result inv) "denied"
             (agent-invocation-error-p inv) nil))
+  (%journal-denial run inv)
+  (%emit-invocation run inv))
+
+(defun %approve-offered (run inv &optional rules)
+  (setf (agent-invocation-status inv) :approved)
+  (%journal-approval run inv rules)
   (%emit-invocation run inv))
 
 (defun %offer-approval (run inv)
@@ -302,17 +308,13 @@ empty text, as it always did."
         (signal 'agent-approval-required :run run :invocation inv)
       (approve ()
         :report "Approve the tool invocation"
-        (setf (agent-invocation-status inv) :approved)
-        (%emit-invocation run inv))
+        (%approve-offered run inv))
       (approve-always ()
         :report "Approve it and allow matching calls for the rest of the run"
-        (%remember-approval run inv)
-        (setf (agent-invocation-status inv) :approved)
-        (%emit-invocation run inv)
+        (%approve-offered run inv (%remember-approval run inv))
         (dolist (other (%proposed-invocations run))
           (when (%now-allowed-p run other)
-            (setf (agent-invocation-status other) :approved)
-            (%emit-invocation run other))))
+            (%approve-offered run other))))
       (deny (&optional feedback)
         :report "Deny the tool invocation"
         :interactive %read-approval-feedback
