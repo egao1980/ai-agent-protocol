@@ -80,6 +80,7 @@
    #:continue-ai-agent
    #:agent-run-post
    #:agent-run-inbox
+   #:drain-agent-run-inbox
    #:agent-run-subagents
    #:agent-run-instructions
    #:tool-instruction-paths

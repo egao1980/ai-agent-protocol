@@ -99,7 +99,13 @@ empty text, as it always did."
                             (agent-run-pending run)))))
   (setf (agent-run-finish-reason run) reason)
   (when (%terminal-finish-p reason)
-    (%remember-run run))
+    (%remember-run run)
+    ;; Steering posted during the last step was not delivered: say so. It
+    ;; stays queued (CONTINUE delivers it) unless taken with
+    ;; DRAIN-AGENT-RUN-INBOX.
+    (let ((undelivered (%undelivered-inbox run)))
+      (when undelivered
+        (%emit run :undelivered undelivered))))
   (%emit run :finished run)
   (funcall callback run)
   run)
@@ -408,6 +414,17 @@ with no parts is dropped."
         (agent-invocation-error-p inv) (getf plist :error-p))
   (%emit-invocation run inv))
 
+(defun %record-tool-failure (run inv condition)
+  "Record INV as failed with CONDITION, the error its handler signalled. A
+refusal (TOOL-FAILURE-KIND :DENIED, e.g. a source's own TOOL-PERMISSION-DENIED)
+is recorded like a rule denial: status :DENIED and a :PERMISSION event."
+  (if (eq (tool-failure-kind condition) :denied)
+      (%refuse-invocation run inv condition)
+      (setf (agent-invocation-status inv) :error
+            (agent-invocation-error-p inv) t
+            (agent-invocation-result inv)
+            (tool-failure-text condition (agent-invocation-name inv)))))
+
 (defun %invoke-one-tool (run inv done)
   (let ((key (%tool-step-key run inv)))
     (multiple-value-bind (hit plist)
@@ -465,14 +482,10 @@ with no parts is dropped."
                                                    :idempotency-key key)
                                                   (%emit-invocation run inv))
                                                 (when (eq act :skip)
-                                                  (setf (agent-invocation-status inv) :error
-                                                        (agent-invocation-error-p inv) t
-                                                        (agent-invocation-result inv)
-                                                        (tool-failure-text
-                                                         c (agent-invocation-name inv)))
+                                                  (%record-tool-failure run inv c)
                                                   (%durable-record-step
                                                    run "tool"
-                                                   (list :status :error
+                                                   (list :status (agent-invocation-status inv)
                                                          :result (agent-invocation-result inv)
                                                          :error-p t)
                                                    :idempotency-key key)

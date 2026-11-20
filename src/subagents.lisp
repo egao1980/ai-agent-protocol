@@ -63,6 +63,33 @@ is journaled with the post)."
         (funcall waiter)))
     run))
 
+(defun drain-agent-run-inbox (run)
+  "Take every turn queued in RUN's inbox (AGENT-RUN-POST, subagent reports),
+oldest first, and leave it empty: those turns are not delivered by the loop
+any more. Atomic with AGENT-RUN-POST.
+
+Turns still queued when a run finishes (steering posted during its last
+step) are reported by the :UNDELIVERED event and stay queued:
+CONTINUE-AI-AGENT-ASYNC delivers them before its first generate, after its
+MESSAGE. A product that sends them itself (e.g. as the follow-up) takes them
+with this function first, so they are sent once.
+
+With a run-state journal the take is not journaled: a replay delivers the
+taken turns at the next generate, with the ones queued after them."
+  (let ((turns (bt:with-lock-held ((agent-run-inbox-lock run))
+                 (shiftf (agent-run-inbox run) nil)))
+        (state (agent-run-journal-state run)))
+    ;; Journaled posts are delivered by position: count the taken ones as
+    ;; drained so a later drain record still names the right posts.
+    (when state
+      (incf (run-journal-drained state) (length turns)))
+    turns))
+
+(defun %undelivered-inbox (run)
+  "A copy of the turns queued in RUN's inbox."
+  (bt:with-lock-held ((agent-run-inbox-lock run))
+    (copy-list (agent-run-inbox run))))
+
 (defun %drain-inbox (run)
   "Append queued inbox turns to RUN's history (before a generate)."
   (let ((turns (if (agent-run-journal-state run)
