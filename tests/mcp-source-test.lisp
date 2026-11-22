@@ -171,9 +171,9 @@
 
 (deftest-parametrize mcp-source-is-error
     ((behavior type retryable)
-     (:retry ai-agent-protocol/mcp:mcp-tool-result-error t)
-     (:failed ai-agent-protocol/mcp:mcp-tool-result-error nil)
-     (:error ai-agent-protocol/mcp:mcp-tool-run-error nil))
+     (:retry 'ai-agent-protocol/mcp:mcp-tool-result-error t)
+     (:failed 'ai-agent-protocol/mcp:mcp-tool-result-error nil)
+     (:error 'ai-agent-protocol/mcp:mcp-tool-run-error nil))
   (with-fake-mcp (client server)
     (let ((src (ai-agent-protocol/mcp:make-mcp-tool-source client :tool-error-behavior behavior)))
       (multiple-value-bind (result err) (%invoke src "fails")
