@@ -58,9 +58,13 @@
       (tool-name-conflict (e)
         (ok (equal "a" (tool-name-conflict-name e)))
         (ok (= 2 (length (tool-name-conflict-sources e))))))
-    (handler-bind ((tool-name-conflict (lambda (e) (declare (ignore e)) (invoke-restart 'continue))))
-      (ok (equal '("a" "b") (%ts-names c)))
-      (ok (equal "first" (%ts-call c "a"))))))
+    ;; The restarting handler wraps the computation, not OK: OK's own ERROR
+    ;; handler would otherwise catch the conflict before CONTINUE is invoked.
+    (multiple-value-bind (names first)
+        (handler-bind ((tool-name-conflict (lambda (e) (declare (ignore e)) (invoke-restart 'continue))))
+          (values (%ts-names c) (%ts-call c "a")))
+      (ok (equal '("a" "b") names))
+      (ok (equal "first" first)))))
 
 (deftest prefixed-source
   (let ((p (make-prefixed-tool-source (%ts-src (%ts-ft "eval" "E") (%ts-ft "read" "R")) "mcp__lisp__")))
