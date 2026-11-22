@@ -15,6 +15,7 @@
    #:agent-canceled
    #:agent-unknown-tool
    #:agent-unknown-tool-name
+   #:agent-unknown-tool-error
    #:agent-tool-error
    #:agent-tool-error-invocation
    #:agent-tool-error-cause
@@ -214,6 +215,21 @@
    #:deny-invocation
    #:complete-invocation
 
-   #:*off-loop-specials*))
+   #:*off-loop-specials*
+
+   ;; 0.15.0 (#37): tool-source combinators (src/toolsets.lisp)
+   #:wrapper-tool-source #:make-wrapper-tool-source #:tool-source-inner
+   #:combined-tool-source #:make-combined-tool-source #:combined-tool-source-sources
+   #:prefixed-tool-source #:make-prefixed-tool-source #:prefixed-tool-source-prefix
+   #:renamed-tool-source #:make-renamed-tool-source #:renamed-tool-source-names
+   #:filtered-tool-source #:make-filtered-tool-source #:filtered-tool-source-predicate
+   #:prepared-tool-source #:make-prepared-tool-source #:prepared-tool-source-function
+   #:approval-required-tool-source #:make-approval-required-tool-source
+   #:approval-required-tool-source-predicate
+   #:tool-predicate-p
+   #:tool-name-conflict #:tool-name-conflict-name #:tool-name-conflict-sources
+   #:agent-tool-output #:make-agent-tool-output #:agent-tool-output-text
+   #:agent-tool-output-parts #:agent-tool-output-structured
+   #:agent-invocation-parts #:agent-invocation-structured))
 
 (in-package #:ai-agent-protocol)

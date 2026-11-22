@@ -37,6 +37,16 @@
                      (agent-unknown-tool-name c)
                      (agent-error-message c)))))
 
+(define-condition agent-unknown-tool-error (agent-unknown-tool agent-error) ()
+  (:report (lambda (c s)
+             (format s "unknown agent tool~@[ ~s~]~@[: ~a~]"
+                     (agent-unknown-tool-name c)
+                     (agent-error-message c))))
+  (:documentation "What INVOKE-TOOL-ASYNC reports to ERROR-CALLBACK for a name
+its source does not offer (0.15.0): an AGENT-UNKNOWN-TOOL that is also an
+ERROR, so INVOKE-TOOL's re-signal reaches HANDLER-CASE on ERROR. The loop's
+own unknown-tool SIGNAL stays a plain AGENT-UNKNOWN-TOOL."))
+
 (define-condition agent-tool-error (agent-condition)
   ((invocation :initarg :invocation :reader agent-tool-error-invocation :initform nil)
    (cause :initarg :cause :reader agent-tool-error-cause :initform nil)
