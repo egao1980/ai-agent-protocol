@@ -1,9 +1,9 @@
 (defsystem "ai-agent-protocol"
-  :version "0.15.0"
+  :version "0.16.0"
   :description "Async-first CLOS agent protocol over llm-protocol (CL tools, invocations, approvals)"
   :author "egao1980"
   :license "MIT"
-  :depends-on ((:version "llm-protocol" "0.5.0") "event-protocol" "bordeaux-threads"
+  :depends-on ((:version "llm-protocol" "0.7.0") "event-protocol" "bordeaux-threads"
                (:version "conversation-protocol" "0.3.0") (:version "steer-protocol" "0.3.0"))
   :properties (:cl-repo
                (:ci (:with ("ai-agent-protocol/mcp"
@@ -27,7 +27,8 @@
                (:file "loop")
                (:file "subagents")
                (:file "journal")
-               (:file "skill-source"))
+               (:file "skill-source")
+               (:file "resilience"))
   :in-order-to ((test-op (test-op "ai-agent-protocol/tests"))))
 
 (defsystem "ai-agent-protocol/mcp"
@@ -146,7 +147,9 @@
                (:file "denied-steering-test")
                ;; 0.15.0 (#37)
                (:file "toolsets-test")
-               (:file "mcp-source-test"))
+               (:file "mcp-source-test")
+               ;; 0.16.0 (#39)
+               (:file "resilience-test"))
   :perform (test-op (o c)
              (unless (symbol-call :rove :run c)
                (error "tests failed for ~A" (component-name c)))))
