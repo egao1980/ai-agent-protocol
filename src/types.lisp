@@ -167,7 +167,10 @@ approvals are saved and read back, or NIL. Run settings extra
    (source :initarg :source :accessor agent-invocation-source :initform nil)
    (error-p :initarg :error-p :accessor agent-invocation-error-p :initform nil)
    (recorded-p :initarg :recorded-p :accessor agent-invocation-recorded-p
-               :initform nil)))
+               :initform nil)
+   ;; 0.15.0 (#37, given): an AGENT-TOOL-OUTPUT's parts and structured content
+   (parts :initarg :parts :accessor agent-invocation-parts :initform nil)
+   (structured :initarg :structured :accessor agent-invocation-structured :initform nil)))
 
 (defun make-agent-invocation (&key id name (arguments "{}") (status :proposed)
                                 result source error-p recorded-p)

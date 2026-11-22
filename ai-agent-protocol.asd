@@ -1,5 +1,5 @@
 (defsystem "ai-agent-protocol"
-  :version "0.14.0"
+  :version "0.15.0"
   :description "Async-first CLOS agent protocol over llm-protocol (CL tools, invocations, approvals)"
   :author "egao1980"
   :license "MIT"
@@ -7,6 +7,7 @@
                (:version "conversation-protocol" "0.3.0") (:version "steer-protocol" "0.3.0"))
   :properties (:cl-repo
                (:ci (:with ("ai-agent-protocol/mcp"
+                            "ai-agent-protocol/policy"
                             "ai-agent-protocol/ag-ui"
                             "ai-agent-protocol/a2a"
                             "ai-agent-protocol/durability"
@@ -19,6 +20,8 @@
                (:file "types")
                (:file "async")
                (:file "protocol")
+               ;; 0.15.0 (#37)
+               (:file "toolsets")
                (:file "permissions")
                (:file "instructions")
                (:file "loop")
@@ -28,15 +31,30 @@
   :in-order-to ((test-op (test-op "ai-agent-protocol/tests"))))
 
 (defsystem "ai-agent-protocol/mcp"
-  :version "0.1.0"
+  :version "0.2.0"
   :description "mcp-protocol tool source + sampling handler for ai-agent-protocol"
   :author "egao1980"
   :license "MIT"
-  :depends-on ("ai-agent-protocol" "mcp-protocol")
+  :depends-on ((:version "ai-agent-protocol" "0.15.0") (:version "mcp-protocol" "0.4.0")
+               "bordeaux-threads")
   :serial t
   :pathname "src/mcp"
   :components ((:file "package")
-               (:file "adapter"))
+               (:file "adapter")
+               ;; 0.2.0 (#37)
+               (:file "source"))
+  :in-order-to ((test-op (test-op "ai-agent-protocol/tests"))))
+
+(defsystem "ai-agent-protocol/policy"
+  :version "0.15.0"
+  :description "policy-protocol policies as tool-source predicates (filters and approvals)"
+  :author "egao1980"
+  :license "MIT"
+  :depends-on ((:version "ai-agent-protocol" "0.15.0") (:version "policy-protocol" "0.1.0"))
+  :serial t
+  :pathname "src/policy"
+  :components ((:file "package")
+               (:file "policy"))
   :in-order-to ((test-op (test-op "ai-agent-protocol/tests"))))
 
 (defsystem "ai-agent-protocol/ag-ui"
@@ -90,6 +108,11 @@
 (defsystem "ai-agent-protocol/tests"
   :depends-on ("ai-agent-protocol"
                "ai-agent-protocol/mcp"
+               ;; 0.15.0 (#37)
+               "ai-agent-protocol/policy"
+               (:version "logic-backend-datalog" "0.1.0")
+               (:version "rpc-backend-stdio" "0.3.2")
+               "mcp-protocol"
                "ai-agent-protocol/ag-ui"
                "ai-agent-protocol/a2a"
                "ai-agent-protocol/durability"
@@ -120,7 +143,10 @@
                (:file "ag-ui-approvals-test")
                (:file "denial-model-test")
                (:file "cancel-continue-test")
-               (:file "denied-steering-test"))
+               (:file "denied-steering-test")
+               ;; 0.15.0 (#37)
+               (:file "toolsets-test")
+               (:file "mcp-source-test"))
   :perform (test-op (o c)
              (unless (symbol-call :rove :run c)
                (error "tests failed for ~A" (component-name c)))))
