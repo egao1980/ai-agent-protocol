@@ -15,6 +15,7 @@
    #:agent-canceled
    #:agent-unknown-tool
    #:agent-unknown-tool-name
+   #:agent-unknown-tool-error
    #:agent-tool-error
    #:agent-tool-error-invocation
    #:agent-tool-error-cause

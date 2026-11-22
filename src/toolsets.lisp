@@ -79,10 +79,6 @@
   (:report (lambda (c s)
              (format s "tool ~s is offered by two sources" (tool-name-conflict-name c)))))
 
-(defun %toolsets-pending (what)
-  "Contract stub (0.15.0). The implementation removes it and every call."
-  (error 'agent-error :message (format nil "not implemented yet (0.15.0 contract): ~a" what)))
-
 (defclass wrapper-tool-source ()
   ((inner :initarg :inner :reader tool-source-inner))
   (:documentation "Delegates every tool-source GF to INNER."))
@@ -128,8 +124,9 @@ ARGUMENTS for approval predicates. Methods: FUNCTION here, policies in
 ai-agent-protocol/policy."))
 
 (defmethod tool-predicate-p ((predicate function) context tool &optional (arguments nil arguments-p))
-  (declare (ignore context tool arguments arguments-p))
-  (%toolsets-pending "tool-predicate-p"))
+  (if arguments-p
+      (funcall predicate context tool arguments)
+      (funcall predicate context tool)))
 
 ;;; Rich output (given)
 
@@ -142,22 +139,213 @@ ai-agent-protocol/policy."))
 (defun make-agent-tool-output (&key (text "") parts structured)
   (make-instance 'agent-tool-output :text text :parts parts :structured structured))
 
-;;; Stubbed methods (the behaviour is the header's)
+;;; Helpers
 
-(macrolet ((stub-methods (class)
+(defun %find-tool (name tools)
+  (find name tools :key #'llm-tool-name :test #'equal))
+
+(defun %retitle-tool (tool name)
+  "A fresh LLM-TOOL named NAME; TOOL's description and parameters shared."
+  (make-llm-tool :name name
+                 :description (llm-tool-description tool)
+                 :parameters (llm-tool-parameters tool)))
+
+(defun %report-unknown-tool (source name error-callback)
+  "As the default INVOKE-TOOL-ASYNC: AGENT-UNKNOWN-TOOL to ERROR-CALLBACK on
+the loop. → NIL (no cancel token)."
+  (let ((cb (or error-callback #'error)))
+    (%call-on-loop
+     (lambda ()
+       (funcall cb (make-condition 'agent-unknown-tool-error
+                                   :name name
+                                   :message (format nil "no tool ~s on ~s" name source)))))
+    nil))
+
+(defun %offered-p (source name context)
+  "True when SOURCE's own listing (for CONTEXT) offers NAME."
+  (and (%find-tool name (list-agent-tools source :context context)) t))
+
+;;; Wrapper: pure delegation to INNER
+
+(defmethod list-agent-tools ((source wrapper-tool-source) &key context)
+  (list-agent-tools (tool-source-inner source) :context context))
+
+(defmethod tool-executable-p ((source wrapper-tool-source) name &key context)
+  (tool-executable-p (tool-source-inner source) name :context context))
+
+(defmethod tool-needs-approval-p ((source wrapper-tool-source) name arguments &key context)
+  (tool-needs-approval-p (tool-source-inner source) name arguments :context context))
+
+(defmethod invoke-tool-async ((source wrapper-tool-source) name arguments
+                              &key context callback error-callback)
+  (invoke-tool-async (tool-source-inner source) name arguments
+                     :context context
+                     :callback callback
+                     :error-callback error-callback))
+
+;;; Combined
+
+(defmethod list-agent-tools ((source combined-tool-source) &key context)
+  (let ((owner (make-hash-table :test 'equal))
+        (out '()))
+    (dolist (src (combined-tool-source-sources source) (nreverse out))
+      (dolist (tool (list-agent-tools src :context context))
+        (let* ((name (llm-tool-name tool))
+               (first (gethash name owner)))
+          (if first
+              (restart-case
+                  (error 'tool-name-conflict
+                         :name name
+                         :sources (list first src)
+                         :message (format nil "tool ~s is offered by two sources" name))
+                (continue ()
+                  :report "Keep the first source's tool and drop this one."
+                  nil))
+              (progn
+                (setf (gethash name owner) src)
+                (push tool out))))))))
+
+(defun %combined-owner (source name context)
+  "The first source of the combined SOURCE that lists NAME, or NIL."
+  (find-if (lambda (src) (%find-tool name (list-agent-tools src :context context)))
+           (combined-tool-source-sources source)))
+
+(defmethod tool-executable-p ((source combined-tool-source) name &key context)
+  (let ((src (%combined-owner source name context)))
+    (if src
+        (tool-executable-p src name :context context)
+        (call-next-method))))
+
+(defmethod tool-needs-approval-p ((source combined-tool-source) name arguments &key context)
+  (let ((src (%combined-owner source name context)))
+    (if src
+        (tool-needs-approval-p src name arguments :context context)
+        (call-next-method))))
+
+(defmethod invoke-tool-async ((source combined-tool-source) name arguments
+                              &key context callback error-callback)
+  (let ((src (%combined-owner source name context)))
+    (if src
+        (invoke-tool-async src name arguments
+                           :context context
+                           :callback callback
+                           :error-callback error-callback)
+        (call-next-method))))
+
+;;; Prefixed
+
+(defun %unprefix (source name)
+  "NAME without SOURCE's prefix, or NIL when NAME does not carry it."
+  (let ((prefix (prefixed-tool-source-prefix source)))
+    (and (stringp name)
+         (> (length name) (length prefix))
+         (string= prefix name :end2 (length prefix))
+         (subseq name (length prefix)))))
+
+(defmethod list-agent-tools ((source prefixed-tool-source) &key context)
+  (declare (ignore context))
+  (let ((prefix (prefixed-tool-source-prefix source)))
+    (mapcar (lambda (tool)
+              (%retitle-tool tool (concatenate 'string prefix (llm-tool-name tool))))
+            (call-next-method))))
+
+(defmethod tool-executable-p ((source prefixed-tool-source) name &key context)
+  (let ((inner (%unprefix source name)))
+    (and inner (call-next-method source inner :context context))))
+
+(defmethod tool-needs-approval-p ((source prefixed-tool-source) name arguments &key context)
+  (let ((inner (%unprefix source name)))
+    (and inner (call-next-method source inner arguments :context context))))
+
+(defmethod invoke-tool-async ((source prefixed-tool-source) name arguments
+                              &key context callback error-callback)
+  (let ((inner (%unprefix source name)))
+    (if inner
+        (call-next-method source inner arguments
+                          :context context
+                          :callback callback
+                          :error-callback error-callback)
+        (%report-unknown-tool source name error-callback))))
+
+;;; Renamed
+
+(defun %renamed-inner (source name)
+  "INNER's name for NAME: a NEW-NAME → its OLD-NAME; an OLD-NAME that was
+renamed → NIL (not callable); any other name → itself."
+  (let* ((names (renamed-tool-source-names source))
+         (cell (assoc name names :test #'equal)))
+    (cond (cell (cdr cell))
+          ((rassoc name names :test #'equal) nil)
+          (t name))))
+
+(defmethod list-agent-tools ((source renamed-tool-source) &key context)
+  (declare (ignore context))
+  (let ((names (renamed-tool-source-names source)))
+    (mapcar (lambda (tool)
+              (let ((cell (rassoc (llm-tool-name tool) names :test #'equal)))
+                (if cell (%retitle-tool tool (car cell)) tool)))
+            (call-next-method))))
+
+(defmethod tool-executable-p ((source renamed-tool-source) name &key context)
+  (let ((inner (%renamed-inner source name)))
+    (and inner (call-next-method source inner :context context))))
+
+(defmethod tool-needs-approval-p ((source renamed-tool-source) name arguments &key context)
+  (let ((inner (%renamed-inner source name)))
+    (and inner (call-next-method source inner arguments :context context))))
+
+(defmethod invoke-tool-async ((source renamed-tool-source) name arguments
+                              &key context callback error-callback)
+  (let ((inner (%renamed-inner source name)))
+    (if inner
+        (call-next-method source inner arguments
+                          :context context
+                          :callback callback
+                          :error-callback error-callback)
+        (%report-unknown-tool source name error-callback))))
+
+;;; Filtered
+
+(defmethod list-agent-tools ((source filtered-tool-source) &key context)
+  (let ((predicate (filtered-tool-source-predicate source)))
+    (remove-if-not (lambda (tool) (tool-predicate-p predicate context tool))
+                   (call-next-method))))
+
+;;; Prepared
+
+(defmethod list-agent-tools ((source prepared-tool-source) &key context)
+  (let* ((tools (call-next-method))
+         (offered (funcall (prepared-tool-source-function source) context tools))
+         (added (remove-if (lambda (name) (%find-tool name tools))
+                           (mapcar #'llm-tool-name offered))))
+    (when added
+      (error 'agent-error
+             :message (format nil "prepared tools may not add or rename: ~{~a~^, ~}" added)))
+    offered))
+
+;;; Filtered and prepared: a name the source's own listing drops is unknown
+
+(macrolet ((offered-only (class)
              `(progn
-                (defmethod list-agent-tools ((source ,class) &key context)
-                  (declare (ignore context))
-                  (%toolsets-pending (format nil "list-agent-tools ~(~a~)" ',class)))
                 (defmethod tool-executable-p ((source ,class) name &key context)
-                  (declare (ignore name context))
-                  (%toolsets-pending (format nil "tool-executable-p ~(~a~)" ',class)))
-                (defmethod tool-needs-approval-p ((source ,class) name arguments &key context)
-                  (declare (ignore name arguments context))
-                  (%toolsets-pending (format nil "tool-needs-approval-p ~(~a~)" ',class)))
+                  (and (%offered-p source name context) (call-next-method)))
                 (defmethod invoke-tool-async ((source ,class) name arguments
                                               &key context callback error-callback)
-                  (declare (ignore name arguments context callback error-callback))
-                  (%toolsets-pending (format nil "invoke-tool-async ~(~a~)" ',class))))))
-  (stub-methods wrapper-tool-source)
-  (stub-methods combined-tool-source))
+                  (declare (ignore arguments callback))
+                  (if (%offered-p source name context)
+                      (call-next-method)
+                      (%report-unknown-tool source name error-callback))))))
+  (offered-only filtered-tool-source)
+  (offered-only prepared-tool-source))
+
+;;; Approval-required
+
+(defmethod tool-needs-approval-p ((source approval-required-tool-source) name arguments
+                                  &key context)
+  (or (call-next-method)
+      (let ((tool (%find-tool name (list-agent-tools (tool-source-inner source)
+                                                     :context context))))
+        (and tool
+             (tool-predicate-p (approval-required-tool-source-predicate source)
+                               context tool arguments)
+             t))))

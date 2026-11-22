@@ -233,13 +233,51 @@ with no parts is dropped."
 
 (defun %append-invocation-turn (run inv)
   (unless (agent-invocation-recorded-p inv)
-    (setf (agent-run-turns run)
-          (append (agent-run-turns run)
-                  (list (tool-turn (agent-invocation-id inv)
-                                   (or (agent-invocation-result inv) "")
-                                   :name (agent-invocation-name inv)
-                                   :error-p (agent-invocation-error-p inv))))
-          (agent-invocation-recorded-p inv) t)))
+    (let ((turn (tool-turn (agent-invocation-id inv)
+                           (or (agent-invocation-result inv) "")
+                           :name (agent-invocation-name inv)
+                           :error-p (agent-invocation-error-p inv))))
+      (setf (agent-run-turns run) (append (agent-run-turns run) (list turn))
+            (agent-invocation-recorded-p inv) t)
+      (when (agent-invocation-parts inv)
+        (setf (%agent-run-rich-tool-turns run)
+              (append (%agent-run-rich-tool-turns run) (list (cons turn inv))))))))
+
+(defun %rich-output-turn (invs)
+  "One :user turn: per invocation of INVS, in order, a text part
+\"[output of tool NAME (ID)]\" followed by its parts (the same objects)."
+  (make-llm-turn
+   :role :user
+   :parts (loop for inv in invs
+                collect (make-llm-text-part
+                         :text (format nil "[output of tool ~a (~a)]"
+                                       (agent-invocation-name inv)
+                                       (agent-invocation-id inv)))
+                append (copy-list (agent-invocation-parts inv)))))
+
+(defun %generate-turns (run)
+  "The turns GENERATE gets: AGENT-RUN-TURNS, plus one :user turn right after
+each run of consecutive tool turns that holds a rich invocation's result
+(AGENT-INVOCATION-PARTS). Tool results stay text; history, journals and memory
+never hold the parts. A run without rich output gets AGENT-RUN-TURNS itself."
+  (let ((rich (%agent-run-rich-tool-turns run)))
+    (if (null rich)
+        (agent-run-turns run)
+        (let ((out '())
+              (block '()))
+          (flet ((flush ()
+                   (when block
+                     (push (%rich-output-turn (nreverse block)) out)
+                     (setf block '()))))
+            (dolist (turn (agent-run-turns run))
+              (unless (eq :tool (llm-turn-role turn))
+                (flush))
+              (push turn out)
+              (let ((cell (assoc turn rich :test #'eq)))
+                (when cell
+                  (push (cdr cell) block))))
+            (flush)
+            (nreverse out))))))
 
 (defun %record-terminal-invocations (run)
   (dolist (inv (agent-run-invocations run))
@@ -425,6 +463,16 @@ is recorded like a rule denial: status :DENIED and a :PERMISSION event."
             (agent-invocation-result inv)
             (tool-failure-text condition (agent-invocation-name inv)))))
 
+(defun %tool-output-values (result)
+  "→ (values TEXT PARTS STRUCTURED) of a tool CALLBACK value: a string, an
+AGENT-TOOL-OUTPUT, or anything else (printed)."
+  (typecase result
+    (string (values result nil nil))
+    (agent-tool-output (values (or (agent-tool-output-text result) "")
+                               (agent-tool-output-parts result)
+                               (agent-tool-output-structured result)))
+    (t (values (princ-to-string result) nil nil))))
+
 (defun %invoke-one-tool (run inv done)
   (let ((key (%tool-step-key run inv)))
     (multiple-value-bind (hit plist)
@@ -441,15 +489,18 @@ is recorded like a rule denial: status :DENIED and a :PERMISSION event."
                             (agent-invocation-arguments inv)
                             :context (list :run run :invocation inv)
                             :callback (lambda (result)
-                                        (let ((plist (list :status :done
-                                                           :result (if (stringp result)
-                                                                       result
-                                                                       (princ-to-string result))
-                                                           :error-p nil)))
-                                          (%durable-record-step run "tool" plist
-                                                                :idempotency-key key)
-                                          (%apply-tool-plist run inv plist)
-                                          (funcall done)))
+                                        (multiple-value-bind (text parts structured)
+                                            (%tool-output-values result)
+                                          ;; Journals record TEXT only.
+                                          (let ((plist (list :status :done
+                                                             :result text
+                                                             :error-p nil)))
+                                            (%durable-record-step run "tool" plist
+                                                                  :idempotency-key key)
+                                            (setf (agent-invocation-parts inv) parts
+                                                  (agent-invocation-structured inv) structured)
+                                            (%apply-tool-plist run inv plist)
+                                            (funcall done))))
                             :error-callback (lambda (c)
                                               (let ((act
                                                      (restart-case
@@ -541,7 +592,9 @@ is recorded like a rule denial: status :DENIED and a :PERMISSION event."
       (when hit
         (%on-generate run (%plist-response plist) callback error-callback)
         (return-from %do-generate)))
-    (let ((choice (%tool-choice run)))
+    (let ((choice (%tool-choice run))
+          ;; On the loop, before the worker starts: rich tool output's :user turns.
+          (turns (%generate-turns run)))
       (multiple-value-bind (eb el) (%event-context)
         (%off-loop
          (lambda ()
@@ -554,7 +607,7 @@ is recorded like a rule denial: status :DENIED and a :PERMISSION event."
                                          (%emit run :part p))))))
              (handler-case
                  (stream-generate (%backend run)
-                                  (agent-run-turns run)
+                                  turns
                                   :model (%run-model run)
                                   :settings (agent-settings-llm (agent-run-settings run))
                                   :tools (collect-run-tools (agent-run-agent run)
@@ -563,7 +616,7 @@ is recorded like a rule denial: status :DENIED and a :PERMISSION event."
                                   :on-part #'emit-part)
                (llm-unsupported ()
                  (let ((response (generate (%backend run)
-                                           (agent-run-turns run)
+                                           turns
                                            :model (%run-model run)
                                            :settings (agent-settings-llm (agent-run-settings run))
                                            :tools (collect-run-tools (agent-run-agent run)

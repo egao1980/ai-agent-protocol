@@ -90,7 +90,7 @@ Sync handlers run off the event loop. An AI-AGENT source runs as a subagent.")
     (let ((cb (or error-callback #'error)))
       (%call-on-loop
        (lambda ()
-         (funcall cb (make-condition 'agent-unknown-tool :name name
+         (funcall cb (make-condition 'agent-unknown-tool-error :name name
                                      :message (format nil "no invoke for ~s on ~s"
                                                       name source)))))
       nil))
@@ -104,7 +104,7 @@ Sync handlers run off the event loop. An AI-AGENT source runs as a subagent.")
         ((not (equal name (llm-tool-name tool)))
          (%call-on-loop
           (lambda ()
-            (funcall err (make-condition 'agent-unknown-tool :name name))))
+            (funcall err (make-condition 'agent-unknown-tool-error :name name))))
          nil)
         ((null fn)
          (%call-on-loop
@@ -120,7 +120,10 @@ Sync handlers run off the event loop. An AI-AGENT source runs as a subagent.")
          (%off-loop
           (lambda ()
             (let ((out (funcall fn arguments)))
-              (if (stringp out) out (princ-to-string out))))
+              ;; An AGENT-TOOL-OUTPUT (toolsets.lisp, 0.15.0) passes through.
+              (if (or (stringp out) (typep out 'agent-tool-output))
+                  out
+                  (princ-to-string out))))
           ok err)))))
   (:method ((child ai-agent) name arguments &key context callback error-callback)
     (declare (ignore context))
@@ -130,7 +133,7 @@ Sync handlers run off the event loop. An AI-AGENT source runs as a subagent.")
         ((not (equal name (ai-agent-name child)))
          (%call-on-loop
           (lambda ()
-            (funcall err (make-condition 'agent-unknown-tool :name name))))
+            (funcall err (make-condition 'agent-unknown-tool-error :name name))))
          nil)
         (t
          (run-ai-agent-async

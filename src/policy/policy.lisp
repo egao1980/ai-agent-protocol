@@ -18,13 +18,28 @@
 (defvar *tool-policy-context* nil
   "NIL, or (lambda (context tool arguments)) → context facts for the policy request.")
 
-(defun %policy-pending (what)
-  (error 'agent:agent-error :message (format nil "not implemented yet (0.15.0 contract): ~a" what)))
+(defun %tool-policy-effect (policy context tool arguments)
+  "The DECISION-EFFECT of POLICY for a call of TOOL (an LLM-TOOL) in CONTEXT."
+  (let ((facts-fn *tool-policy-context*))
+    (policy:decision-effect
+     (policy:evaluate-policy
+      policy
+      (policy:make-policy-request
+       :action (llm-protocol:llm-tool-name tool)
+       :resources '("*")
+       :context (and (functionp facts-fn)
+                     (funcall facts-fn context tool arguments)))))))
+
+(defun %policy-holds-p (policy context tool arguments arguments-p)
+  "The header's projection of a decision: as an approval (ARGUMENTS-P), true
+for :ASK and :FORBID; as a filter, true unless :FORBID."
+  (let ((effect (%tool-policy-effect policy context tool arguments)))
+    (if arguments-p
+        (and (member effect '(:ask :forbid)) t)
+        (not (eq effect :forbid)))))
 
 (defmethod agent:tool-predicate-p ((predicate policy:policy) context tool &optional (arguments nil arguments-p))
-  (declare (ignore context tool arguments arguments-p))
-  (%policy-pending "tool-predicate-p policy"))
+  (%policy-holds-p predicate context tool arguments arguments-p))
 
 (defmethod agent:tool-predicate-p ((predicate policy:layered-policy) context tool &optional (arguments nil arguments-p))
-  (declare (ignore context tool arguments arguments-p))
-  (%policy-pending "tool-predicate-p layered-policy"))
+  (%policy-holds-p predicate context tool arguments arguments-p))
