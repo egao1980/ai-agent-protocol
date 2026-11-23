@@ -1,5 +1,5 @@
 (defsystem "ai-agent-protocol"
-  :version "0.16.1"
+  :version "0.17.0"
   :description "Async-first CLOS agent protocol over llm-protocol (CL tools, invocations, approvals)"
   :author "egao1980"
   :license "MIT"
@@ -22,6 +22,8 @@
                (:file "protocol")
                ;; 0.15.0 (#37)
                (:file "toolsets")
+               ;; 0.17.0 (H3e-2b; after 0.16.0, #39)
+               (:file "deferred")
                (:file "permissions")
                (:file "instructions")
                (:file "loop")
@@ -32,7 +34,7 @@
   :in-order-to ((test-op (test-op "ai-agent-protocol/tests"))))
 
 (defsystem "ai-agent-protocol/mcp"
-  :version "0.2.0"
+  :version "0.3.0"
   :description "mcp-protocol tool source + sampling handler for ai-agent-protocol"
   :author "egao1980"
   :license "MIT"
@@ -151,7 +153,10 @@
                ;; 0.16.0 (#39)
                (:file "resilience-test")
                ;; 0.16.1 (#51)
-               (:file "tool-end-test"))
+               (:file "tool-end-test")
+               ;; 0.17.0 (H3e-2b)
+               (:file "deferred-test")
+               (:file "sampling-handler-test"))
   :perform (test-op (o c)
              (unless (symbol-call :rove :run c)
                (error "tests failed for ~A" (component-name c)))))

@@ -1,6 +1,26 @@
 (in-package #:ai-agent-protocol/mcp)
 
 ;;; MCP sampling lives here — not in llm-protocol.
+;;;
+;;; 0.3.0 (contract, ai-agent-protocol 0.17.0; cl-stack-code H3e-2b): the host
+;;; decides the model and the budget, never the server.
+;;;   MAKE-MCP-SAMPLING-HANDLER &key (BACKEND *LLM-BACKEND*) MODEL MAX-TOKENS
+;;;   → (lambda (params)) for MCP-CLIENT-SAMPLING-HANDLER:
+;;;     MODEL   the :MODEL of GENERATE. The request's modelPreferences (hints,
+;;;             priorities) are never a model name: 0.2 passed the first hint as
+;;;             the model, so a server chose among the host's models. NIL →
+;;;             NIL (the backend's default model).
+;;;     MAX-TOKENS  the cap: :MAX-TOKENS of the settings is min(the request's
+;;;             maxTokens, MAX-TOKENS), MAX-TOKENS when the request has none, the
+;;;             request's when MAX-TOKENS is NIL.
+;;;     Content: a message's text content as 0.2; an image content item
+;;;             {"type": "image", "data", "mimeType"} → an LLM-IMAGE-PART (data
+;;;             and media type as given) in that turn; audio → the text part
+;;;             "[audio omitted]". includeContext is ignored (the host never
+;;;             shares its conversation through it).
+;;;     The result's "model": the response's model, else MODEL, else omitted.
+;;;   GIVEN: the keys (ignored until implemented: today's behaviour). STUBBED:
+;;;   nothing else; the changes are the implementation's.
 
 (defun %hint-name (prefs)
   (cond
@@ -82,8 +102,10 @@
    "content" (mcp-protocol:make-text-content (or (llm-response-text response) ""))
    "stopReason" (%stop-reason (llm-response-finish-reason response))))
 
-(defun make-mcp-sampling-handler (&key (backend llm-protocol:*llm-backend*))
-  "Host create-message → GENERATE. Not an llm-protocol concern."
+(defun make-mcp-sampling-handler (&key (backend llm-protocol:*llm-backend*) model max-tokens)
+  "Host create-message → GENERATE. Not an llm-protocol concern. MODEL and
+MAX-TOKENS: 0.3.0 (see the header)."
+  (declare (ignorable model max-tokens))
   (lambda (params)
     (llm-response->mcp-create-message
      (generate (or backend llm-protocol:*llm-backend*)

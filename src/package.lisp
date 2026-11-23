@@ -240,6 +240,23 @@
    #:tool-name-conflict #:tool-name-conflict-name #:tool-name-conflict-sources
    #:agent-tool-output #:make-agent-tool-output #:agent-tool-output-text
    #:agent-tool-output-parts #:agent-tool-output-structured
-   #:agent-invocation-parts #:agent-invocation-structured #:agent-tool-output-end-run-p #:agent-invocation-end-run-p))
+   #:agent-invocation-parts #:agent-invocation-structured #:agent-tool-output-end-run-p #:agent-invocation-end-run-p
+   ;; 0.17.0 (H3e-2b): deferred tool loading (src/deferred.lisp)
+   #:deferred-tool-source
+   #:make-deferred-tool-source
+   #:deferred-tool-source-mode
+   #:deferred-tool-source-threshold
+   #:deferred-tool-source-keep
+   #:deferred-tool-source-search-tool-name
+   #:deferred-tool-source-max-results
+   #:deferred-tool-source-on-load
+   #:deferred-tool-source-loaded
+   #:deferred-tool-source-active-p
+   #:deferred-tool-source-deferred
+   #:tool-search-matches
+   #:agent-deferred-tool-error
+   #:+tool-search-name+
+   #:+tool-search-default-results+
+   #:+tool-search-description+))
 
 (in-package #:ai-agent-protocol)
