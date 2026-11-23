@@ -254,7 +254,6 @@
    #:deferred-tool-source-active-p
    #:deferred-tool-source-deferred
    #:tool-search-matches
-   #:agent-deferred-tool-error
    #:+tool-search-name+
    #:+tool-search-default-results+
    #:+tool-search-description+))

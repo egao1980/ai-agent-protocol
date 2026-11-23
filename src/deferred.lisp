@@ -6,9 +6,12 @@
 ;;; keyword queries). Found while contracting cl-stack-code's MCP part 2
 ;;; (H3e-2b, brief: cl-stack docs/capabilities/cl-stack-code.md "H3e-2b —
 ;;; locked"; this library's brief: docs/capabilities/ai-agent.md "0.17.0").
-;;; GIVEN: the class, its constructor and readers, the condition, the
-;;; constants. STUBBED: every method and function below. Nothing in it is
-;;; MCP-specific: any source can be deferred.
+;;; GIVEN: the class, its constructor and readers, the constants. STUBBED:
+;;; every method and function below; the loop's routing change (below) is the
+;;; implementation's. Nothing in it is MCP-specific: any source can be
+;;; deferred. Amended 2026-11-23 (the user's decision): a deferred tool called
+;;; by name before any search is loaded and run, not refused, because a skill
+;;; or instructions can name it directly.
 ;;;
 ;;; DEFERRED-TOOL-SOURCE (MAKE-DEFERRED-TOOL-SOURCE INNER &key (MODE :AUTO)
 ;;;   (THRESHOLD 40) KEEP (SEARCH-TOOL-NAME +TOOL-SEARCH-NAME+)
@@ -34,7 +37,8 @@
 ;;;   as other sources take them) {"query", "max_results"}: matches =
 ;;;   TOOL-SEARCH-MATCHES of the deferrable tools; each is added to the loaded
 ;;;   set; ON-LOAD (a function of the list of names newly loaded, in INNER's
-;;;   order) is called when there are any, before the callback. The result
+;;;   order, and :VIA :SEARCH) is called when there are any, before the
+;;;   callback. The result
 ;;;   text:
 ;;;     "Loaded N tool[s]; they can be called from the next step:" then one
 ;;;     line "- NAME: DESCRIPTION" per match (the description's first line,
@@ -45,11 +49,20 @@
 ;;;   A missing or non-string query, or max_results outside 1..20 → a tool
 ;;;   error (ERROR-CALLBACK, AGENT-ERROR "tool_search needs a query" / "…
 ;;;   max_results must be 1 to 20"), the model reads it.
-;;;   A deferrable tool not loaded (while active): TOOL-EXECUTABLE-P NIL;
-;;;   INVOKE-TOOL-ASYNC → ERROR-CALLBACK gets AGENT-DEFERRED-TOOL-ERROR (an
-;;;   AGENT-UNKNOWN-TOOL-ERROR, so the loop treats it as any unknown tool),
-;;;   message "tool NAME is deferred: call SEARCH-TOOL-NAME with select:NAME
-;;;   first". Every other name delegates to INNER (as a wrapper).
+;;;   A deferrable tool not loaded (while active), called by its exact name
+;;;   (auto-load): TOOL-EXECUTABLE-P T and TOOL-NEEDS-APPROVAL-P INNER's (the
+;;;   call goes through the host's permission path as any call: rules,
+;;;   approvals, plan mode). INVOKE-TOOL-ASYNC (so only a call that the
+;;;   permission path let run) first adds NAME to the loaded set and calls
+;;;   ON-LOAD with (NAME) and :VIA :CALL, then delegates to INNER; from the
+;;;   next step on the tool is listed. A denied or rejected call loads
+;;;   nothing. A name INNER does not offer stays an unknown tool (INNER's
+;;;   AGENT-UNKNOWN-TOOL-ERROR). Every other name delegates to INNER (as a
+;;;   wrapper).
+;;;   The loop (src/loop.lisp, %FIND-SOURCE): a call whose name no source
+;;;   lists goes to the first source (in the run's order) whose
+;;;   TOOL-EXECUTABLE-P is true for it, so a tool can be called before it is
+;;;   listed; a name no source lists or executes is unknown, as before.
 ;;;   The loaded set: DEFERRED-TOOL-SOURCE-LOADED source → names in load
 ;;;   order; (SETF DEFERRED-TOOL-SOURCE-LOADED) replaces it (a host restoring
 ;;;   a revision). A loaded name INNER no longer lists is skipped in listings
@@ -68,6 +81,8 @@
 ;;;   in its description; tools scoring 0 are dropped, the rest ordered by
 ;;;   score (higher first), then TOOLS' order. No READ, no regex engine.
 ;;;
+;;; ON-LOAD: (lambda (names &key via)), VIA :SEARCH or :CALL.
+;;;
 ;;; Non-goals: embeddings or BM25 ranking (a host may wrap the source and rank
 ;;; its own way), deferring per run (the set is the source's), unloading.
 
@@ -77,9 +92,6 @@
 
 (defparameter +tool-search-description+
   "Search the deferred tools and load the matches: they can be called from the next step. Query with words from a tool's name or description, or select:NAME,NAME for exact names.")
-
-(define-condition agent-deferred-tool-error (agent-unknown-tool-error) ()
-  (:documentation "0.17.0: a call of a deferred tool that is not loaded."))
 
 (defclass deferred-tool-source (wrapper-tool-source)
   ((mode :initarg :mode :initform :auto :reader deferred-tool-source-mode)

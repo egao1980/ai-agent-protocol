@@ -38,7 +38,8 @@
     (ok (equal '("tool_search") (%ts-names d)) "only the search tool")
     (ok (equal (mapcar #'llm-tool-name (%df-tools 6)) (deferred-tool-source-deferred d)))
     (ok (tool-executable-p d "tool_search"))
-    (ok (not (tool-executable-p d "tool_03")) "a deferred tool is not executable")
+    (ok (tool-executable-p d "tool_03") "a deferred tool can be called by name (auto-load)")
+    (ok (not (tool-executable-p d "tool_99")) "a name the inner source lacks cannot")
     (ok (not (tool-needs-approval-p d "tool_search" "{\"query\":\"x\"}")) "never asks")
     (ok (equal '("*") (tool-permission-resources d "tool_search" "{\"query\":\"x\"}")))))
 
@@ -74,12 +75,12 @@
 
 (deftest deferred-search-loads
   (let* ((loads '())
-         (d (%df 12 :threshold 5 :on-load (lambda (names) (push names loads))))
+         (d (%df 12 :threshold 5 :on-load (lambda (names &key via) (push (list names via) loads))))
          (text (%df-search d "invoice")))
     (ok (search "Loaded 2 tools; they can be called from the next step:" text))
     (ok (search "- tool_03: Extra tool 03 about invoice" text))
     (ok (search "- tool_08: Extra tool 08 about invoice" text))
-    (ok (equal '(("tool_03" "tool_08")) loads) "ON-LOAD once, with the new names")
+    (ok (equal '((("tool_03" "tool_08") :search)) loads) "ON-LOAD once, with the new names, via :search")
     (ok (equal '("tool_03" "tool_08" "tool_search") (%ts-names d)) "offered from now on, inner order")
     (ok (equal "tool_08 ran" (%ts-call d "tool_08")))
     (ok (equal '("tool_03" "tool_08") (deferred-tool-source-loaded d)))
@@ -106,13 +107,43 @@
     (%df-search d "extra" 3)
     (ok (= 3 (length (deferred-tool-source-loaded d))) "every tool matches \"extra\": the first 3")))
 
-(deftest deferred-unloaded-call
-  (let ((d (%df 6 :threshold 5)))
-    (multiple-value-bind (result e) (%ts-call d "tool_04")
+(deftest deferred-call-loads
+  (let* ((loads '())
+         (d (%df 6 :threshold 5 :on-load (lambda (names &key via) (push (list names via) loads)))))
+    (ok (equal "tool_04 ran" (%ts-call d "tool_04")) "called by name before any search: it runs")
+    (ok (equal '((("tool_04") :call)) loads) "loaded via :call")
+    (ok (equal '("tool_04") (deferred-tool-source-loaded d)))
+    (ok (equal '("tool_04" "tool_search") (%ts-names d)) "listed from the next step on")
+    (%ts-call d "tool_04")
+    (ok (= 1 (length loads)) "a loaded tool's call loads nothing")
+    (multiple-value-bind (result e) (%ts-call d "tool_99")
       (ok (null result))
-      (ok (typep e 'agent-deferred-tool-error))
-      (ok (typep e 'agent-unknown-tool-error) "the loop treats it as an unknown tool")
-      (ok (search "select:tool_04" (princ-to-string e))))))
+      (ok (typep e 'agent-unknown-tool-error) "a name the inner source lacks stays unknown")
+      (ok (equal '("tool_04") (deferred-tool-source-loaded d))))))
+
+(deftest deferred-call-keeps-the-permission-path
+  (let ((d (make-deferred-tool-source
+            (make-combined-tool-source
+             (%ts-ft "a") (%ts-ft "b") (%ts-ft "c") (%ts-ft "guarded" "G" :approval t))
+            :threshold 2)))
+    (ok (deferred-tool-source-active-p d))
+    (ok (tool-needs-approval-p d "guarded" "{}") "the inner source's approval, before any load")
+    (ok (not (tool-needs-approval-p d "a" "{}")))
+    (ok (null (deferred-tool-source-loaded d)) "asking about a call loads nothing")))
+
+(deftest deferred-call-through-the-loop
+  (with-agent-loop
+    (let* ((d (%df 6 :threshold 5))
+           (backend (make-mock-llm-backend
+                     :handler (%one-shot-tools
+                               (list (make-llm-tool-call-part :id "c1" :name "tool_05" :arguments "{}"))
+                               "done")))
+           (agent (make-ai-agent :name "deferred" :backend backend :tools (list d)))
+           (run (run-ai-agent agent "go")))
+      (ok (eq :stop (agent-run-finish-reason run)))
+      (ok (equal "tool_05 ran" (agent-invocation-result (first (agent-run-invocations run))))
+          "the loop routes a name no source lists to the source that executes it")
+      (ok (equal '("tool_05") (deferred-tool-source-loaded d))))))
 
 (deftest deferred-loaded-setf
   (let ((d (%df 6 :threshold 5)))
