@@ -256,7 +256,23 @@ state (subagents, inbox, instructions), else NIL.")
    (rich-tool-turns :accessor %agent-run-rich-tool-turns :initform nil
                     :documentation "Alist (TOOL-TURN . INVOCATION) of tool turns
 whose invocation carries AGENT-INVOCATION-PARTS, matched by EQ when the turns
-go to GENERATE (src/loop.lisp %GENERATE-TURNS).")))
+go to GENERATE (src/loop.lisp %GENERATE-TURNS).")
+   ;; 0.16.0 (#39): internal, not journaled (src/resilience.lisp)
+   (continuations :accessor %agent-run-continuations :initform 0
+                  :documentation "Continuations since the last response that did
+not end :LENGTH (rule 3).")
+   (continuing-p :accessor %agent-run-continuing-p :initform nil
+                 :documentation "T while the next response continues a chain.")
+   (chain-text :accessor %agent-run-chain-text :initform nil
+               :documentation "Concatenated text of the continuation chain that
+ends with CHAIN-RESPONSE, or NIL.")
+   (chain-response :accessor %agent-run-chain-response :initform nil
+                   :documentation "The response CHAIN-TEXT ends with.")
+   (length-retry-step :accessor %agent-run-length-retry-step :initform nil
+                      :documentation "Step regenerated with raised max tokens for
+a truncated tool call (rule 4a), or NIL.")
+   (manual-compactions :accessor %agent-run-manual-compactions :initform 0
+                       :documentation "COMPACT-AGENT-RUN calls (journal keys).")))
 
 (defstruct (run-journal-state (:conc-name run-journal-))
   "Inbox bookkeeping of a run whose journal carries run state."
@@ -292,5 +308,10 @@ RUN-AI-AGENT-ASYNC records it as the new run's AGENT-RUN-PARENT.")
   (typep x 'agent-run))
 
 (defun agent-run-text (run)
+  "Text of the run's last response; of a continued reply (0.16.0 rule 3), the
+concatenated texts of the chain, first to last."
   (let ((r (agent-run-last-response run)))
-    (and r (llm-response-text r))))
+    (cond ((null r) nil)
+          ((and (%agent-run-chain-text run) (eq r (%agent-run-chain-response run)))
+           (%agent-run-chain-text run))
+          (t (llm-response-text r)))))
