@@ -151,11 +151,15 @@ with no parts is dropped."
         :key #'ai-agent-name :test #'equal))
 
 (defun %find-source (run name)
-  (or (find-if (lambda (s)
-                 (some (lambda (d) (equal name (llm-tool-name d)))
-                       (list-agent-tools s)))
-               (agent-run-sources run))
-      (%handoff-for run name)))
+  (let ((sources (agent-run-sources run)))
+    (or (find-if (lambda (s)
+                   (some (lambda (d) (equal name (llm-tool-name d)))
+                         (list-agent-tools s)))
+                 sources)
+        ;; 0.17.0: a name no source lists goes to the first source that
+        ;; executes it (a deferred tool called before it is listed).
+        (find-if (lambda (s) (tool-executable-p s name)) sources)
+        (%handoff-for run name))))
 
 (defun %emit-invocation (run inv)
   "Emit :invocation for statuses the transformer / TUI care about."
