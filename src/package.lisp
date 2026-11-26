@@ -256,6 +256,10 @@
    #:tool-search-matches
    #:+tool-search-name+
    #:+tool-search-default-results+
-   #:+tool-search-description+))
+   #:+tool-search-description+
+   #:invoke-agent-retry
+   #:agent-retryable-p
+   #:auto-retry-generate
+   #:with-auto-retry-generate))
 
 (in-package #:ai-agent-protocol)

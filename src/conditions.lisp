@@ -203,13 +203,12 @@ CONDITION: what went wrong plus what to do next, by TOOL-FAILURE-KIND.")
 (defmacro with-agent-restarts (&body body)
   `(call-with-agent-restarts (lambda () ,@body)))
 
-(defun invoke-retry (&optional condition)
+(defun invoke-agent-retry (&optional condition)
+  "Invoke the agent's RETRY restart (the generate step's, or
+WITH-AGENT-RESTARTS'); NIL when none is active. LLM-PROTOCOL:INVOKE-RETRY
+finds only llm-protocol's own RETRY restart."
   (let ((r (find-restart 'retry condition)))
     (when r (invoke-restart r))))
-
-(defun invoke-use-value (value &optional condition)
-  (let ((r (find-restart 'use-value condition)))
-    (when r (invoke-restart r value))))
 
 (defun invoke-skip-tool (&optional condition)
   (let ((r (find-restart 'skip-tool condition)))
@@ -282,9 +281,23 @@ call once and drop its rules."
   (when (find-restart 'pause-for-approval condition)
     (invoke-pause-for-approval condition)))
 
-(defun auto-retry (condition)
-  (when (find-restart 'retry condition)
-    (invoke-retry condition)))
+(defun agent-retryable-p (condition)
+  "T when CONDITION, or the cause of an AGENT-GENERATE-ERROR, has a transient
+LLM-RETRY-CLASS (:RATE-LIMIT, :OVERLOADED or :TRANSIENT). Auth, bad-request
+and context-overflow failures are not retryable."
+  (let ((c (if (typep condition 'agent-generate-error)
+               (agent-generate-error-cause condition)
+               condition)))
+    (and c
+         (member (llm-retry-class c) '(:rate-limit :overloaded :transient))
+         t)))
+
+(defun auto-retry-generate (condition)
+  "HANDLER-BIND for AGENT-GENERATE-ERROR: the agent's RETRY when
+AGENT-RETRYABLE-P; otherwise decline so outer handlers run."
+  (when (and (agent-retryable-p condition)
+             (find-restart 'retry condition))
+    (invoke-agent-retry condition)))
 
 (defmacro with-auto-skip-tool (&body body)
   `(handler-bind ((agent-tool-error #'auto-skip-tool)
@@ -293,4 +306,9 @@ call once and drop its rules."
 
 (defmacro with-auto-pause-approval (&body body)
   `(handler-bind ((agent-approval-required #'auto-pause-approval))
+     ,@body))
+
+(defmacro with-auto-retry-generate (&body body)
+  "Retry a failed generate step whose cause is retryable (AUTO-RETRY-GENERATE)."
+  `(handler-bind ((agent-generate-error #'auto-retry-generate))
      ,@body))
