@@ -240,6 +240,6 @@
    #:tool-name-conflict #:tool-name-conflict-name #:tool-name-conflict-sources
    #:agent-tool-output #:make-agent-tool-output #:agent-tool-output-text
    #:agent-tool-output-parts #:agent-tool-output-structured
-   #:agent-invocation-parts #:agent-invocation-structured))
+   #:agent-invocation-parts #:agent-invocation-structured #:agent-tool-output-end-run-p #:agent-invocation-end-run-p))
 
 (in-package #:ai-agent-protocol)

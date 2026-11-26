@@ -418,7 +418,10 @@ never hold the parts. A run without rich output gets AGENT-RUN-TURNS itself."
                 (lambda (i)
                   (and (eq (agent-invocation-status i) :approved)
                        (not (agent-invocation-recorded-p i))))
-                (agent-run-invocations run))))
+                (agent-run-invocations run)))
+        ;; 0.16.1 (#51): a done call whose output said :END-RUN
+        (enders (remove-if-not #'agent-invocation-end-run-p
+                               (agent-run-invocations run))))
     (setf (agent-run-pending run) pending)
     (cond
       ((%check-canceled run callback))
@@ -430,6 +433,11 @@ never hold the parts. A run without rich output gets AGENT-RUN-TURNS itself."
                     :deferred
                     :approval)
                 callback))
+      (enders
+       ;; Every call of the step is recorded: no model step follows. The
+       ;; flag is spent, so a CONTINUE of this run generates again.
+       (dolist (i enders) (setf (agent-invocation-end-run-p i) nil))
+       (%finish run :tool-end callback))
       (t
        (%tick-run run callback error-callback)))))
 
@@ -453,7 +461,9 @@ never hold the parts. A run without rich output gets AGENT-RUN-TURNS itself."
 (defun %apply-tool-plist (run inv plist)
   (setf (agent-invocation-status inv) (or (getf plist :status) :done)
         (agent-invocation-result inv) (getf plist :result)
-        (agent-invocation-error-p inv) (getf plist :error-p))
+        (agent-invocation-error-p inv) (getf plist :error-p)
+        ;; 0.16.1 (#51): live and replayed alike
+        (agent-invocation-end-run-p inv) (and (getf plist :end-run) t))
   (%emit-invocation run inv))
 
 (defun %record-tool-failure (run inv condition)
@@ -468,14 +478,15 @@ is recorded like a rule denial: status :DENIED and a :PERMISSION event."
             (tool-failure-text condition (agent-invocation-name inv)))))
 
 (defun %tool-output-values (result)
-  "→ (values TEXT PARTS STRUCTURED) of a tool CALLBACK value: a string, an
-AGENT-TOOL-OUTPUT, or anything else (printed)."
+  "→ (values TEXT PARTS STRUCTURED END-RUN) of a tool CALLBACK value: a string,
+an AGENT-TOOL-OUTPUT, or anything else (printed)."
   (typecase result
-    (string (values result nil nil))
+    (string (values result nil nil nil))
     (agent-tool-output (values (or (agent-tool-output-text result) "")
                                (agent-tool-output-parts result)
-                               (agent-tool-output-structured result)))
-    (t (values (princ-to-string result) nil nil))))
+                               (agent-tool-output-structured result)
+                               (agent-tool-output-end-run-p result)))
+    (t (values (princ-to-string result) nil nil nil))))
 
 (defun %invoke-one-tool (run inv done)
   (let ((key (%tool-step-key run inv)))
@@ -493,12 +504,13 @@ AGENT-TOOL-OUTPUT, or anything else (printed)."
                             (agent-invocation-arguments inv)
                             :context (list :run run :invocation inv)
                             :callback (lambda (result)
-                                        (multiple-value-bind (text parts structured)
+                                        (multiple-value-bind (text parts structured end-run)
                                             (%tool-output-values result)
-                                          ;; Journals record TEXT only.
-                                          (let ((plist (list :status :done
-                                                             :result text
-                                                             :error-p nil)))
+                                          ;; Journals record TEXT only, plus the end-run flag (0.16.1).
+                                          (let ((plist (list* :status :done
+                                                              :result text
+                                                              :error-p nil
+                                                              (and end-run (list :end-run t)))))
                                             (%durable-record-step run "tool" plist
                                                                   :idempotency-key key)
                                             (setf (agent-invocation-parts inv) parts
