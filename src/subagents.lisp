@@ -238,6 +238,12 @@ is cleared, and so is any assistant turn it left in flight (#29)."
         (agent-run-wrap-up-p run) nil
         (agent-run-compacted-step run) nil
         (agent-run-generate-attempt run) 1
+        ;; 0.16.0 per-chain state (src/resilience.lisp)
+        (%agent-run-continuations run) 0
+        (%agent-run-continuing-p run) nil
+        (%agent-run-chain-text run) nil
+        (%agent-run-chain-response run) nil
+        (%agent-run-length-retry-step run) nil
         (agent-run-turns run)
         (append (agent-run-turns run)
                 (list (if (stringp message) (user-turn message) message))))

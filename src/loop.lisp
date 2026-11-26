@@ -69,8 +69,12 @@ empty text, as it always did."
    :parts (mapcar #'%plist-part (getf plist :parts))))
 
 (defun %generate-step-key (run)
-  (%segment-key run (format nil "generate/~d~:[~;/wrap-up~]" (agent-run-step run)
-                            (agent-run-wrap-up-p run))))
+  ;; /length-retry: the regenerate of a truncated tool call (0.16.0 rule 4a)
+  ;; must not replay the truncated response journaled under the plain key.
+  (%segment-key run (format nil "generate/~d~:[~;/wrap-up~]~:[~;/length-retry~]"
+                            (agent-run-step run)
+                            (agent-run-wrap-up-p run)
+                            (%length-retry-step-p run))))
 
 (defun %extra (run key &optional default)
   "KEY of the run's AGENT-SETTINGS-EXTRA plist, or DEFAULT when absent."
@@ -548,10 +552,16 @@ AGENT-TOOL-OUTPUT, or anything else (printed)."
       (progn
         (when (%check-canceled run callback)
           (return-from %on-generate))
+        ;; 0.16.0 rule 4a: a cut-off tool call → drop RESPONSE before commit
+        ;; and regenerate the step with more output tokens.
+        (when (%length-retry-p run response)
+          (return-from %on-generate
+            (%retry-truncated run callback error-callback)))
         (setf (agent-run-last-response run) response)
         (%commit-assistant-turn run response)
         (setf (agent-run-usage-anchor run) (length (agent-run-turns run))
               (agent-run-generate-attempt run) 1)
+        (%track-continuation run response)
         (%emit run :response response)
         (when (agent-run-wrap-up-p run)
           (%strip-tool-calls run)
@@ -559,11 +569,16 @@ AGENT-TOOL-OUTPUT, or anything else (printed)."
         (let ((calls (%committed-tool-calls run))
               (reason (llm-response-finish-reason response)))
           (cond
+            ((and (null calls) (%continue-output-p run reason))
+             (%continue-output run response callback error-callback))
             ((null calls)
              (%finish-or-await-subagents run (or reason :stop)
                                          callback error-callback))
             (t
-             (let ((invs (mapcar (lambda (c) (%classify run c)) calls)))
+             (let* ((cut (and (eq reason :length) (car (last calls))))
+                    (invs (append (mapcar (lambda (c) (%classify run c))
+                                          (if cut (butlast calls) calls))
+                                  (and cut (list (%truncated-invocation run cut))))))
                (setf (agent-run-invocations run)
                      (append (agent-run-invocations run) invs))
                (let ((handoff (find :handoff invs :key #'agent-invocation-status)))
@@ -594,7 +609,9 @@ AGENT-TOOL-OUTPUT, or anything else (printed)."
         (return-from %do-generate)))
     (let ((choice (%tool-choice run))
           ;; On the loop, before the worker starts: rich tool output's :user turns.
-          (turns (%generate-turns run)))
+          (turns (%generate-turns run))
+          ;; 0.16.0 rule 4a: a copy with raised max tokens on a length retry.
+          (llm-settings (%step-llm-settings run)))
       (multiple-value-bind (eb el) (%event-context)
         (%off-loop
          (lambda ()
@@ -609,7 +626,7 @@ AGENT-TOOL-OUTPUT, or anything else (printed)."
                  (stream-generate (%backend run)
                                   turns
                                   :model (%run-model run)
-                                  :settings (agent-settings-llm (agent-run-settings run))
+                                  :settings llm-settings
                                   :tools (collect-run-tools (agent-run-agent run)
                                                             :extra (agent-run-extra run))
                                   :tool-choice choice
@@ -618,7 +635,7 @@ AGENT-TOOL-OUTPUT, or anything else (printed)."
                  (let ((response (generate (%backend run)
                                            turns
                                            :model (%run-model run)
-                                           :settings (agent-settings-llm (agent-run-settings run))
+                                           :settings llm-settings
                                            :tools (collect-run-tools (agent-run-agent run)
                                                                      :extra (agent-run-extra run))
                                            :tool-choice choice)))
@@ -686,30 +703,31 @@ blocking it); otherwise fail the run."
             (not (eql (agent-run-compacted-step run) step)))
        (setf (agent-run-compacted-step run) step)
        (%discard-in-flight run)
-       (%emit run :retry (list :reason :context-overflow :condition c))
+       (%emit run :retry (%retry-payload :context-overflow c
+                                         (agent-run-generate-attempt run) 0))
        (%maybe-compact run
                        (lambda (did)
                          (if did
                              (%generate-with-instructions run callback error-callback)
                              (funcall error-callback c)))
                        error-callback
-                       :force t))
+                       :force t :reason :overflow))
       (t
-       (let* ((attempt (agent-run-generate-attempt run))
-              (delay (retry-delay (%extra run :retry-policy *retry-policy*)
-                                  c attempt)))
+       (let* ((policy (%extra run :retry-policy *retry-policy*))
+              (attempt (agent-run-generate-attempt run))
+              (delay (retry-delay policy c attempt)))
          (if (null delay)
              (funcall error-callback c)
-             (multiple-value-bind (eb el) (%event-context)
+             (progn
                (setf (agent-run-generate-attempt run) (1+ attempt))
                (%discard-in-flight run)
-               (%emit run :retry (list :reason (llm-retry-class c) :attempt attempt
-                                       :delay delay :condition c))
-               (event:sleep* eb el delay
-                             :callback (lambda ()
-                                         (unless (%check-canceled run callback)
-                                           (%do-generate run callback
-                                                         error-callback)))))))))))
+               ;; 0.16.0 rule 1: park the wait first, so a cancel — even one
+               ;; made from inside the :retry emit — ends it at once.
+               (%backoff run delay
+                         (lambda () (%do-generate run callback error-callback))
+                         callback)
+               (%emit run :retry (%retry-payload (llm-retry-class c) c attempt
+                                                 delay policy)))))))))
 
 ;;; --- agent-side compaction -------------------------------------------------
 ;;; Settings extra :compaction is a conversation memory (e.g. summary-memory);
@@ -750,11 +768,15 @@ summary)."
   (append (mapcar #'%state-turn (getf record :head))
           (last old (getf record :keep))))
 
-(defun %maybe-compact (run next error-callback &key force)
+(defun %maybe-compact (run next error-callback
+                       &key force (reason (if force :overflow :threshold))
+                         instructions key)
   "Call NEXT with T after compacting the run's turns, or NIL when nothing was
 compacted. Counting and summarizing run off the loop. Under :durability the
 outcome is journaled and replayed verbatim: no second summarizer call, and the
-replayed history is the one the run had (#17)."
+replayed history is the one the run had (#17). REASON goes to the :COMPACTED
+event (:threshold, :overflow or :manual); INSTRUCTIONS are added to the
+summary prompt for this call only; KEY overrides the journal key (0.16.0)."
   (let ((mem (%compactor run)))
     (if (null mem)
         (funcall next nil)
@@ -763,41 +785,54 @@ replayed history is the one the run had (#17)."
                (anchor (agent-run-usage-anchor run))
                (response (agent-run-last-response run))
                (usage (and anchor response (llm-response-usage response)))
-               (key (%compact-step-key run force)))
-          (flet ((apply-compacted (new)
+               (key (or key (%compact-step-key run force))))
+          (flet ((apply-compacted (new keep tokens)
                    (setf (agent-run-turns run) new
                          (agent-run-usage-anchor run) nil)
                    (%instructions-compacted run)
                    (%emit run :compacted (list :before (length turns)
-                                               :after (length new)))))
+                                               :after (length new)
+                                               :reason reason
+                                               :summary (butlast new keep)
+                                               :keep keep
+                                               :tokens-before tokens))))
             (multiple-value-bind (hit record)
                 (%durable-step-replayed run "compact" :idempotency-key key)
               (when hit
                 (let ((did (getf record :did)))
                   (when did
-                    (apply-compacted (%compaction-turns turns record)))
+                    ;; Records before 0.16.0 have no :tokens-before → NIL.
+                    (apply-compacted (%compaction-turns turns record)
+                                     (getf record :keep)
+                                     (getf record :tokens-before)))
                   (return-from %maybe-compact (funcall next did)))))
             (%off-loop
              (lambda ()
-               (when (or force
-                         (let ((limit (%compact-limit run backend)))
-                           (and limit
-                                (> (anchored-token-count backend turns
+               (let* ((limit (and (not force) (%compact-limit run backend)))
+                      (tokens (and limit
+                                   (anchored-token-count backend turns
                                                          :usage usage
-                                                         :anchor-count (or anchor 0))
-                                   limit))))
-                 (multiple-value-list
-                  (conversation:compact-turns mem turns :backend backend))))
+                                                         :anchor-count (or anchor 0)))))
+                 (when (or force (and tokens (> tokens limit)))
+                   (cons tokens
+                         (multiple-value-list
+                          (%compact-turns-with mem turns backend instructions))))))
              (lambda (result)
-               (let ((did (and result (second result) t)))
-                 (%durable-record-step run "compact"
-                                       (if did
-                                           (%compaction-record turns (first result))
-                                           (list :did nil))
-                                       :idempotency-key key)
-                 (when did
-                   (apply-compacted (first result)))
-                 (funcall next did)))
+               (destructuring-bind (&optional tokens new did) result
+                 (let* ((did (and did
+                                  ;; A manual compaction raced by a continue:
+                                  ;; the result no longer matches the turns.
+                                  (or (not (eq reason :manual))
+                                      (eq turns (agent-run-turns run)))
+                                  t))
+                        (record (if did
+                                    (list* :reason reason :tokens-before tokens
+                                           (%compaction-record turns new))
+                                    (list :did nil))))
+                   (%durable-record-step run "compact" record :idempotency-key key)
+                   (when did
+                     (apply-compacted new (getf record :keep) tokens))
+                   (funcall next did))))
              error-callback))))))
 
 (defun %wrap-up-or-finish (run callback error-callback)

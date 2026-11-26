@@ -182,6 +182,16 @@
    #:agent-run-finish-reason
    #:agent-run-last-response
    #:agent-run-text
+   ;; 0.16.0 (src/resilience.lisp)
+   #:+continuation-prompt+
+   #:+truncated-tool-call-feedback+
+   #:agent-output-truncated
+   #:agent-output-truncated-invocation
+   #:agent-output-truncated-max-tokens
+   #:response-truncated-calls
+   #:continuation-turn
+   #:continuation-turn-p
+   #:compact-agent-run
    #:agent-run-handle
    #:agent-run-on-event
    #:agent-run-on-part
