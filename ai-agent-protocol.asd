@@ -1,5 +1,5 @@
 (defsystem "ai-agent-protocol"
-  :version "0.17.0"
+  :version "0.17.1"
   :description "Async-first CLOS agent protocol over llm-protocol (CL tools, invocations, approvals)"
   :author "egao1980"
   :license "MIT"
@@ -131,6 +131,7 @@
   :components ((:file "package")
                (:file "protocol-test")
                (:file "restarts-test")
+               (:file "retry-isolation-test")
                (:file "mcp-test")
                (:file "ag-ui-test")
                (:file "a2a-test")

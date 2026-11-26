@@ -66,7 +66,7 @@
       (let* ((agent (make-ai-agent :name "x" :backend backend))
              (run (handler-bind ((agent-generate-error
                                   (lambda (c)
-                                    (invoke-retry c))))
+                                    (invoke-agent-retry c))))
                     (run-ai-agent agent "hi"))))
         (ok (eq :stop (agent-run-finish-reason run)))
         (ok (equal "recovered" (agent-run-text run)))
