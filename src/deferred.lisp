@@ -115,43 +115,240 @@
                                        :search-tool-name search-tool-name :max-results max-results
                                        :on-load on-load))
 
-(defun %deferred-pending (what)
-  (error 'agent-error :message (format nil "0.17.0 contract: ~a is not implemented" what)))
+(defun %deferred-json (&rest kvs)
+  "A fresh EQUAL hash table of the KEY VALUE pairs KVS (subagents.lisp's
+%JSON-OBJECT loads after this file)."
+  (let ((h (make-hash-table :test 'equal)))
+    (loop for (k v) on kvs by #'cddr do (setf (gethash k h) v))
+    h))
 
 (defun deferred-tool-source-loaded (source)
   "→ the loaded names, in load order."
-  (declare (ignore source))
-  (%deferred-pending "deferred-tool-source-loaded"))
+  (bt:with-lock-held ((%deferred-lock source))
+    (copy-list (%deferred-loaded source))))
 
 (defun (setf deferred-tool-source-loaded) (names source)
-  (declare (ignore names source))
-  (%deferred-pending "(setf deferred-tool-source-loaded)"))
+  (check-type names list)
+  (let ((copy (remove-duplicates (copy-list names) :test #'equal :from-end t)))
+    (bt:with-lock-held ((%deferred-lock source))
+      (setf (%deferred-loaded source) copy)))
+  names)
+
+(defun %deferred-add-loaded (source names)
+  "Append the NAMES not loaded yet (NAMES' order) to the loaded set. → the new
+ones. Holds the lock only for the update: no callouts."
+  (bt:with-lock-held ((%deferred-lock source))
+    (let* ((old (%deferred-loaded source))
+           (new (remove-if (lambda (name) (member name old :test #'equal))
+                           (remove-duplicates names :test #'equal :from-end t))))
+      (when new
+        (setf (%deferred-loaded source) (append old new)))
+      new)))
+
+(defun %deferred-notify (source names via)
+  "ON-LOAD with NAMES and VIA, when there is an ON-LOAD and NAMES. Outside the lock."
+  (let ((fn (deferred-tool-source-on-load source)))
+    (when (and fn names)
+      (funcall fn names :via via))))
+
+(defun %deferral (source context)
+  "One snapshot of INNER for CONTEXT → (values tools deferrable active-p).
+INNER is listed outside the lock."
+  (let* ((tools (list-agent-tools (tool-source-inner source) :context context))
+         (keep (deferred-tool-source-keep source))
+         (deferrable (if keep
+                         (remove-if (lambda (tool) (tool-predicate-p keep context tool)) tools)
+                         tools))
+         (n (length deferrable)))
+    (values tools
+            deferrable
+            (ecase (deferred-tool-source-mode source)
+              (:never nil)
+              (:always (plusp n))
+              (:auto (> n (deferred-tool-source-threshold source)))))))
+
+(defun %deferred-pending-names (source deferrable)
+  "The names of DEFERRABLE not loaded, in DEFERRABLE's order."
+  (let ((loaded (deferred-tool-source-loaded source)))
+    (loop for tool in deferrable
+          for name = (llm-tool-name tool)
+          unless (member name loaded :test #'equal)
+            collect name)))
 
 (defun deferred-tool-source-active-p (source &key context)
-  (declare (ignore source context))
-  (%deferred-pending "deferred-tool-source-active-p"))
+  (nth-value 2 (%deferral source context)))
 
 (defun deferred-tool-source-deferred (source &key context)
-  (declare (ignore source context))
-  (%deferred-pending "deferred-tool-source-deferred"))
+  (multiple-value-bind (tools deferrable active) (%deferral source context)
+    (declare (ignore tools))
+    (and active (%deferred-pending-names source deferrable))))
+
+(defun %deferred-trim (string)
+  (string-trim '(#\Space #\Tab #\Return #\Newline #\Page) string))
+
+(defun %query-word-char-p (char)
+  (or (alphanumericp char) (char= char #\_) (char= char #\-)))
+
+(defun %query-words (query)
+  "QUERY's words, lower case: split at whitespace and punctuation other than _ and -."
+  (let ((words '())
+        (start nil)
+        (n (length query)))
+    (loop for i from 0 to n
+          for char = (and (< i n) (char query i))
+          do (cond ((and char (%query-word-char-p char))
+                    (unless start (setf start i)))
+                   (start
+                    (push (string-downcase (subseq query start i)) words)
+                    (setf start nil))))
+    (nreverse words)))
+
+(defun %select-names (text)
+  "The comma-separated names of TEXT, trimmed, empty ones and repeats dropped."
+  (let ((names '())
+        (start 0))
+    (loop for comma = (position #\, text :start start)
+          for name = (%deferred-trim (subseq text start (or comma (length text))))
+          do (when (and (plusp (length name)) (not (member name names :test #'string=)))
+               (push name names))
+             (if comma (setf start (1+ comma)) (loop-finish)))
+    (nreverse names)))
 
 (defun tool-search-matches (tools query &key (max-results +tool-search-default-results+))
-  (declare (ignore tools query max-results))
-  (%deferred-pending "tool-search-matches"))
+  (let ((q (%deferred-trim query)))
+    (if (and (>= (length q) 7) (string-equal "select:" q :end2 7))
+        (let* ((wanted (%select-names (subseq q 7)))
+               (found (remove-if-not (lambda (tool) (member (llm-tool-name tool) wanted :test #'equal))
+                                     tools)))
+          (values found
+                  (remove-if (lambda (name) (%find-tool name found)) wanted)))
+        (let* ((words (%query-words q))
+               (scored (loop for tool in tools
+                             for name = (llm-tool-name tool)
+                             for description = (or (llm-tool-description tool) "")
+                             for score = (loop for word in words
+                                               sum (cond ((search word name :test #'char-equal) 2)
+                                                         ((search word description :test #'char-equal) 1)
+                                                         (t 0)))
+                             when (plusp score)
+                               collect (cons score tool)))
+               (sorted (mapcar #'cdr (stable-sort scored #'> :key #'car))))
+          (values (subseq sorted 0 (min (length sorted) max-results)) nil)))))
+
+(defun %search-name-p (source name)
+  (equal name (deferred-tool-source-search-tool-name source)))
+
+(defun %search-tool (source pending)
+  "The search tool's LLM-TOOL; PENDING: the deferred names not loaded."
+  (let ((n (length pending)))
+    (make-llm-tool
+     :name (deferred-tool-source-search-tool-name source)
+     :description (format nil "~a~%Deferred tools: ~{~a~^, ~}~@[, … and ~d more~]"
+                          +tool-search-description+
+                          (subseq pending 0 (min n 200))
+                          (and (> n 200) (- n 200)))
+     :parameters (%deferred-json
+                  "type" "object"
+                  "properties" (%deferred-json
+                                "query" (%deferred-json "type" "string")
+                                "max_results" (%deferred-json "type" "integer"
+                                                              "minimum" 1 "maximum" 20))
+                  "required" (vector "query")))))
+
+(defun %search-arguments (source arguments)
+  "ARGUMENTS (JSON text, hash table or plist) → (values query max-results).
+Signals AGENT-ERROR on a missing or non-string query, or max_results outside 1..20."
+  (let* ((tool (deferred-tool-source-search-tool-name source))
+         (args (cond ((hash-table-p arguments) arguments)
+                     ((stringp arguments)
+                      (let ((parsed (try-parse-json-output arguments)))
+                        (and (hash-table-p parsed) parsed)))
+                     ((and (consp arguments) (keywordp (car arguments)))
+                      (%deferred-json "query" (getf arguments :query)
+                                      "max_results" (or (getf arguments :max-results)
+                                                        (getf arguments :max_results))))))
+         (query (and args (gethash "query" args)))
+         (max (and args (gethash "max_results" args))))
+    (unless (stringp query)
+      (error 'agent-error :message (format nil "~a needs a query" tool)))
+    (when (or (null max) (eq max :null) (eq max 'null))
+      (setf max (deferred-tool-source-max-results source)))
+    (unless (typep max '(integer 1 20))
+      (error 'agent-error :message (format nil "~a max_results must be 1 to 20" tool)))
+    (values query max)))
+
+(defun %first-line (text)
+  (let* ((text (or text ""))
+         (line (subseq text 0 (or (position #\Newline text) (length text)))))
+    (subseq line 0 (min 200 (length line)))))
+
+(defun %search-result-text (query matches missing pending-count)
+  (with-output-to-string (s)
+    (if matches
+        (progn
+          (format s "Loaded ~d tool~:p; they can be called from the next step:" (length matches))
+          (dolist (tool matches)
+            (format s "~%- ~a: ~a" (llm-tool-name tool) (%first-line (llm-tool-description tool)))))
+        (format s "No deferred tool matches \"~a\" (~d deferred). Try other words or select:NAME."
+                query pending-count))
+    (when missing
+      (format s "~%Not found: ~{~a~^, ~}" missing))))
+
+(defun %invoke-search (source deferrable arguments callback error-callback)
+  "The search call: load the matches, ON-LOAD, then CALLBACK with the result
+text on the loop. Bad arguments: their AGENT-ERROR to ERROR-CALLBACK. → NIL."
+  (let ((ok (or callback (lambda (value) (declare (ignore value)))))
+        (err (or error-callback #'error)))
+    (multiple-value-bind (query max condition)
+        (handler-case (%search-arguments source arguments)
+          (agent-error (c) (values nil nil c)))
+      (if condition
+          (%call-on-loop (lambda () (funcall err condition)))
+          (multiple-value-bind (matches missing)
+              (tool-search-matches deferrable query :max-results max)
+            (let* ((pending-count (length (%deferred-pending-names source deferrable)))
+                   (ordered (loop for tool in deferrable
+                                  when (member tool matches :test #'eq)
+                                    collect (llm-tool-name tool)))
+                   (new (%deferred-add-loaded source ordered))
+                   (text (%search-result-text query matches missing pending-count)))
+              (%deferred-notify source new :search)
+              (%call-on-loop (lambda () (funcall ok text))))))))
+  nil)
 
 (defmethod list-agent-tools ((source deferred-tool-source) &key context)
-  (declare (ignore context))
-  (%deferred-pending "list-agent-tools (deferred-tool-source)"))
+  (multiple-value-bind (tools deferrable active) (%deferral source context)
+    (if (not active)
+        tools
+        (let ((pending (%deferred-pending-names source deferrable)))
+          (append (remove-if (lambda (tool) (member (llm-tool-name tool) pending :test #'equal))
+                             tools)
+                  (list (%search-tool source pending)))))))
 
 (defmethod tool-executable-p ((source deferred-tool-source) name &key context)
-  (declare (ignore name context))
-  (%deferred-pending "tool-executable-p (deferred-tool-source)"))
+  (if (and (%search-name-p source name)
+           (deferred-tool-source-active-p source :context context))
+      t
+      ;; INNER's answer: a deferred tool stays executable (auto-load), a name
+      ;; INNER lacks does not.
+      (call-next-method)))
 
 (defmethod tool-needs-approval-p ((source deferred-tool-source) name arguments &key context)
-  (declare (ignore name arguments context))
-  (%deferred-pending "tool-needs-approval-p (deferred-tool-source)"))
+  (if (and (%search-name-p source name)
+           (deferred-tool-source-active-p source :context context))
+      nil
+      ;; INNER's approval; asking loads nothing.
+      (call-next-method)))
 
 (defmethod invoke-tool-async ((source deferred-tool-source) name arguments
                               &key context callback error-callback)
-  (declare (ignore name arguments context callback error-callback))
-  (%deferred-pending "invoke-tool-async (deferred-tool-source)"))
+  (multiple-value-bind (tools deferrable active) (%deferral source context)
+    (declare (ignore tools))
+    (cond
+      ((and active (%search-name-p source name))
+       (%invoke-search source deferrable arguments callback error-callback))
+      (t
+       ;; Auto-load: only a call the permission path let run reaches here.
+       (when (and active (%find-tool name deferrable))
+         (%deferred-notify source (%deferred-add-loaded source (list name)) :call))
+       (call-next-method)))))
