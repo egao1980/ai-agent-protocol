@@ -170,7 +170,9 @@ approvals are saved and read back, or NIL. Run settings extra
                :initform nil)
    ;; 0.15.0 (#37, given): an AGENT-TOOL-OUTPUT's parts and structured content
    (parts :initarg :parts :accessor agent-invocation-parts :initform nil)
-   (structured :initarg :structured :accessor agent-invocation-structured :initform nil)))
+   (structured :initarg :structured :accessor agent-invocation-structured :initform nil)
+   ;; 0.16.1 (#51): the output asked to end the run (cleared once it has)
+   (end-run-p :initarg :end-run-p :accessor agent-invocation-end-run-p :initform nil)))
 
 (defun make-agent-invocation (&key id name (arguments "{}") (status :proposed)
                                 result source error-p recorded-p)

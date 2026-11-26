@@ -1,5 +1,5 @@
 (defsystem "ai-agent-protocol"
-  :version "0.16.0"
+  :version "0.16.1"
   :description "Async-first CLOS agent protocol over llm-protocol (CL tools, invocations, approvals)"
   :author "egao1980"
   :license "MIT"
@@ -149,7 +149,9 @@
                (:file "toolsets-test")
                (:file "mcp-source-test")
                ;; 0.16.0 (#39)
-               (:file "resilience-test"))
+               (:file "resilience-test")
+               ;; 0.16.1 (#51)
+               (:file "tool-end-test"))
   :perform (test-op (o c)
              (unless (symbol-call :rove :run c)
                (error "tests failed for ~A" (component-name c)))))

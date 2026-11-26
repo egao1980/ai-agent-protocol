@@ -5,7 +5,8 @@
 
 (defun %echo-tool-backend (counter)
   "A user turn → call tool \"noop\"; a tool result → reply with the user text
-it answers. COUNTER's car counts generate calls."
+it answers (#53: or the summary's, when a compaction folded the question into
+it). COUNTER's car counts generate calls."
   (flet ((asked-p (turn)
            (and (eq :user (llm-turn-role turn))
                 (notany #'llm-tool-result-part-p (llm-turn-parts turn)))))
@@ -15,12 +16,13 @@ it answers. COUNTER's car counts generate calls."
                 (incf (car counter))
                 (let ((last (%last-turn turns)))
                   (cond
-                   ((find-if #'llm-tool-result-part-p (llm-turn-parts last))
-                    (%say (format nil "answer: ~a"
-                                  (turn-text (find-if #'asked-p turns :from-end t)))))
-                   ((asked-p last)
-                    (%call (format nil "c~d" (car counter)) "noop" "{}"))
-                   (t (%say "?"))))))))
+                    ((find-if #'llm-tool-result-part-p (llm-turn-parts last))
+                     (%say (format nil "answer: ~a"
+                                   (turn-text (or (find-if #'asked-p turns :from-end t)
+                                                  (first turns))))))
+                    ((asked-p last)
+                     (%call (format nil "c~d" (car counter)) "noop" "{}"))
+                    (t (%say "?"))))))))
 
 (defun %noop-agent (counter)
   (let ((agent (make-ai-agent :name "cont" :backend (%echo-tool-backend counter))))
@@ -95,9 +97,11 @@ it answers. COUNTER's car counts generate calls."
                   (run-ai-agent agent (%history)
                                 :durability (%dur journal "compact-run")
                                 :on-event (lambda (kind payload)
-                                            (when (and (eq kind :step) (eql payload 2))
-                                              (setf crash (task-protocol:copy-in-memory-journal
-                                                           journal))))))))
+                                            (declare (ignore payload))
+                                            ;; #53: the crash follows the last compaction (llm-protocol 0.7.1
+                                            ;; counts tool parts, so this run compacts twice)
+                                            (when (eq kind :compacted)
+                                              (setf crash (task-protocol:copy-in-memory-journal journal))))))))
       (ok (eq :stop (agent-run-finish-reason run)))
       (ok (plusp (car sn)) "the run compacted")
       (ok crash)

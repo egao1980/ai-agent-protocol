@@ -133,11 +133,17 @@ ai-agent-protocol/policy."))
 (defclass agent-tool-output ()
   ((text :initarg :text :reader agent-tool-output-text :initform "")
    (parts :initarg :parts :reader agent-tool-output-parts :initform nil)
-   (structured :initarg :structured :reader agent-tool-output-structured :initform nil))
-  (:documentation "A tool's result with non-text parts and structured content (0.15.0)."))
+   (structured :initarg :structured :reader agent-tool-output-structured :initform nil)
+   ;; 0.16.1 (#51)
+   (end-run :initarg :end-run :reader agent-tool-output-end-run-p :initform nil
+            :documentation "T: the run finishes :TOOL-END once every call of
+this step is recorded; no model step follows."))
+  (:documentation "A tool's result with non-text parts and structured content (0.15.0),
+and an end-run flag (0.16.1)."))
 
-(defun make-agent-tool-output (&key (text "") parts structured)
-  (make-instance 'agent-tool-output :text text :parts parts :structured structured))
+(defun make-agent-tool-output (&key (text "") parts structured end-run)
+  (make-instance 'agent-tool-output :text text :parts parts :structured structured
+                                    :end-run (and end-run t)))
 
 ;;; Helpers
 
