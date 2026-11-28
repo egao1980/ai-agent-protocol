@@ -163,3 +163,104 @@
                          (make-condition 'tool-permission-denied
                                          :decision (denial-decision :unattended)))))
     (ok (signals (denial-decision :robot)))))
+
+;;; cl-stack-code#59: a cancel while the generate is in flight finishes the
+;;; run at once; the generate's late parts and response are dropped.
+
+(defun %blocking-handler (release &key (text "late answer") (limit 10))
+  "Mock handler that holds the generate until (CAR RELEASE) is true (or LIMIT s)."
+  (lambda (backend turns &rest keys)
+    (declare (ignore backend turns keys))
+    (loop with deadline = (+ (get-internal-real-time)
+                             (* limit internal-time-units-per-second))
+          until (or (car release) (> (get-internal-real-time) deadline))
+          do (sleep 0.02))
+    (make-llm-response :parts (list (make-llm-text-part :text text))
+                       :finish-reason :stop)))
+
+(defun %drain-loop (seconds)
+  "Run the bound loop for SECONDS so late deliveries land."
+  (let ((eb event-protocol:*event-backend*)
+        (el event-protocol:*event-loop*))
+    (event-protocol:sleep* eb el seconds
+                           :callback (lambda () (event-protocol:stop eb el)))
+    (event-protocol:run eb el :stop-when-idle nil)))
+
+(deftest cancel-during-in-flight-generate-finishes-at-once
+  (with-agent-loop
+    (let* ((release (list nil))
+           (events (list nil))
+           (box (list nil))
+           (agent (make-ai-agent :name "slow"
+                                 :backend (make-mock-llm-backend
+                                           :handler (%blocking-handler release))))
+           (start (get-internal-real-time))
+           (run (progn
+                  (event-protocol:sleep* event-protocol:*event-backend*
+                                         event-protocol:*event-loop* 0.3
+                                         :callback (lambda ()
+                                                     (when (car box)
+                                                       (cancel-agent-run (car box)))))
+                  (run-ai-agent agent "hello"
+                                :on-event (lambda (kind payload)
+                                            (when (eq kind :started)
+                                              (setf (car box) payload))
+                                            (push kind (car events))))))
+           (elapsed (/ (- (get-internal-real-time) start)
+                       internal-time-units-per-second)))
+      (unwind-protect
+          (progn
+            (ok (eq :canceled (agent-run-finish-reason run)))
+            (ok (< elapsed 3) (format nil "returned after ~,2f s, not after the request" elapsed))
+            (ok (null (agent-run-in-flight-turn run)))
+            (setf (car release) t)
+            (%drain-loop 0.5)
+            (ok (eq :canceled (agent-run-finish-reason run))
+                "the late response does not reopen the run")
+            (ok (notany (lambda (turn)
+                          (and (eq :assistant (llm-turn-role turn))
+                               (some (lambda (p)
+                                       (and (llm-text-part-p p)
+                                            (search "late answer" (llm-text-part-text p))))
+                                     (llm-turn-parts turn))))
+                        (agent-run-turns run))
+                "the late response is not committed")
+            (ok (= 1 (count :finished (car events))) "finished once")
+            (ok (not (member :part (car events))) "no late :part events")
+            (ok (not (member :response (car events))) "no late :response event"))
+        (setf (car release) t)))))
+
+(deftest continue-after-in-flight-cancel-generates-again
+  (with-agent-loop
+    (let* ((release (list nil))
+           (box (list nil))
+           (calls (list 0))
+           (blocking (%blocking-handler release))
+           (agent (make-ai-agent
+                   :name "slow"
+                   :backend (make-mock-llm-backend
+                             :handler (lambda (backend turns &rest keys)
+                                        (if (= 1 (incf (car calls)))
+                                            (apply blocking backend turns keys)
+                                            (make-llm-response
+                                             :parts (list (make-llm-text-part :text "fresh"))
+                                             :finish-reason :stop))))))
+           (run (progn
+                  (event-protocol:sleep* event-protocol:*event-backend*
+                                         event-protocol:*event-loop* 0.3
+                                         :callback (lambda ()
+                                                     (when (car box)
+                                                       (cancel-agent-run (car box)))))
+                  (run-ai-agent agent "hello"
+                                :on-event (lambda (kind payload)
+                                            (when (eq kind :started)
+                                              (setf (car box) payload)))))))
+      (unwind-protect
+          (progn
+            (ok (eq :canceled (agent-run-finish-reason run)))
+            (setf (car release) t)
+            (%drain-loop 0.3)
+            (continue-ai-agent run "again")
+            (ok (eq :stop (agent-run-finish-reason run)))
+            (ok (equal "fresh" (agent-run-text run))))
+        (setf (car release) t)))))

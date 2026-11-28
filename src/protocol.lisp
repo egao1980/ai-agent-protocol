@@ -157,7 +157,8 @@ Sync handlers run off the event loop. An AI-AGENT source runs as a subagent.")
 (defgeneric cancel-agent-run (handle)
   (:documentation "Cancel an in-flight RUN-AI-AGENT-ASYNC handle. Background
 subagents the run started are canceled too; a run waiting for them finishes
-as :canceled.")
+as :canceled. A run waiting for a generate (0.19.0) or a retry backoff finishes
+as :canceled at once; the late parts and response of that generate are dropped.")
   (:method ((handle agent-run-handle))
     (setf (agent-run-handle-canceled-p handle) t)
     (let ((run (agent-run-handle-run handle)))

@@ -616,6 +616,42 @@ an AGENT-TOOL-OUTPUT, or anything else (printed)."
     (error (e)
       (funcall error-callback e))))
 
+(defun %park-generate-wait (run callback eb el)
+  "0.19.0 (cl-stack-code#59): an in-flight generate is a wait, parked in
+AGENT-RUN-WAITER as a retry backoff is. CANCEL-AGENT-RUN calls the waiter from
+any thread; it hops to the loop and finishes the run :CANCELED there
+(%CHECK-CANCELED: CONTINUE keeps waiting) instead of waiting for the request
+to end. → a function of an optional SETTLE flag, called on the loop when a
+part (SETTLE NIL) or the generate's result (SETTLE T) arrives: T means the step
+is still live, NIL means the run already finished and the arrival is dropped."
+  (let ((done nil) (waiter nil))
+    (labels ((park ()
+               (setf (agent-run-waiter run) waiter))
+             (unpark ()
+               (when (eq (agent-run-waiter run) waiter)
+                 (setf (agent-run-waiter run) nil)))
+             (wake-on-loop ()
+               (unless done
+                 (if (%canceled-p run)
+                     (progn
+                       (setf done t)
+                       (unpark)
+                       (unless (%check-canceled run callback)
+                         ;; CONTINUE: keep waiting for the generate.
+                         (setf done nil)
+                         (park)))
+                     ;; Some other wake (a post to the inbox): keep waiting.
+                     (park)))))
+      (setf waiter (lambda () (event:wake-call eb el #'wake-on-loop)))
+      (park)
+      ;; A cancel that landed before the waiter was parked found no waiter.
+      (when (%canceled-p run)
+        (funcall waiter))
+      (lambda (&optional settle)
+        (cond (done nil)
+              (settle (setf done t) (unpark) t)
+              (t t))))))
+
 (defun %do-generate (run callback error-callback)
   (let ((key (%generate-step-key run)))
     (multiple-value-bind (hit plist)
@@ -629,84 +665,93 @@ an AGENT-TOOL-OUTPUT, or anything else (printed)."
           ;; 0.16.0 rule 4a: a copy with raised max tokens on a length retry.
           (llm-settings (%step-llm-settings run)))
       (multiple-value-bind (eb el) (%event-context)
-        (%off-loop
-         (lambda ()
-           (flet ((emit-part (part)
-                    (let ((p part))
-                      ;; Capture EB/EL — worker has no *event-loop* binding.
-                      (event:wake-call eb el
-                                       (lambda ()
-                                         (%append-in-flight-part run p)
-                                         (%emit run :part p))))))
-             (handler-case
-                 (stream-generate (%backend run)
-                                  turns
-                                  :model (%run-model run)
-                                  :settings llm-settings
-                                  :tools (collect-run-tools (agent-run-agent run)
-                                                            :extra (agent-run-extra run))
-                                  :tool-choice choice
-                                  :on-part #'emit-part)
-               (llm-unsupported ()
-                 (let ((response (generate (%backend run)
-                                           turns
-                                           :model (%run-model run)
-                                           :settings llm-settings
-                                           :tools (collect-run-tools (agent-run-agent run)
-                                                                     :extra (agent-run-extra run))
-                                           :tool-choice choice)))
-                   (dolist (part (llm-response-parts response))
-                     (emit-part part))
-                   response)))))
-         (lambda (response)
-           (%durable-record-step run "generate" (%response-plist response)
-                                 :idempotency-key key)
-           (%on-generate run response callback error-callback))
-         (lambda (c)
-           (let* ((compact-instructions nil)
-                  (act (restart-case
-                           (progn
-                             (signal 'agent-generate-error
-                                     :run run
-                                     :step (agent-run-step run)
-                                     :cause c
-                                     :message (princ-to-string c))
-                             :fail)
-                         (retry ()
-                           :report "Retry GENERATE"
-                           (progn :retry))
-                         (compact-and-retry (&optional instructions)
-                           ;; 0.18.0 (#47): offered when the run has a compactor.
-                           :report "Compact the run's turns, then retry GENERATE"
-                           :test (lambda (condition)
-                                   (declare (ignore condition))
-                                   (%compactor run))
-                           :interactive (lambda ()
-                                          (format *query-io* "Summary instructions (empty for none): ")
-                                          (force-output *query-io*)
-                                          (let ((line (read-line *query-io* nil "")))
-                                            (and (plusp (length line)) (list line))))
-                           (check-type instructions (or null string))
-                           (setf compact-instructions instructions)
-                           :compact)
-                         (use-value (response)
-                           :report "Use a supplied LLM-RESPONSE"
-                           (%durable-record-step run "generate"
-                                                 (%response-plist response)
-                                                 :idempotency-key key)
-                           (%on-generate run response callback error-callback)
-                           :used)
-                         (abort ()
-                           :report "Fail the generate step"
-                           (progn :fail)))))
-             (cond
-               ((eq act :retry)
-                (%discard-in-flight run)
-                (%do-generate run callback error-callback))
-               ((eq act :compact)
-                (%compact-and-retry run c compact-instructions callback error-callback))
-               ((eq act :fail)
-                (%recover-generate run c callback error-callback))))))))))
+        (let ((live (%park-generate-wait run callback eb el)))
+          (%off-loop
+           (lambda ()
+             (flet ((emit-part (part)
+                      (let ((p part))
+                        ;; Capture EB/EL — worker has no *event-loop* binding.
+                        (event:wake-call eb el
+                                         (lambda ()
+                                           ;; Parts of a canceled step are dropped.
+                                           (when (funcall live)
+                                             (%append-in-flight-part run p)
+                                             (%emit run :part p)))))))
+               (handler-case
+                   (stream-generate (%backend run)
+                                    turns
+                                    :model (%run-model run)
+                                    :settings llm-settings
+                                    :tools (collect-run-tools (agent-run-agent run)
+                                                              :extra (agent-run-extra run))
+                                    :tool-choice choice
+                                    :on-part #'emit-part)
+                 (llm-unsupported ()
+                   (let ((response (generate (%backend run)
+                                             turns
+                                             :model (%run-model run)
+                                             :settings llm-settings
+                                             :tools (collect-run-tools (agent-run-agent run)
+                                                                       :extra (agent-run-extra run))
+                                             :tool-choice choice)))
+                     (dolist (part (llm-response-parts response))
+                       (emit-part part))
+                     response)))))
+           (lambda (response)
+             ;; A late response of a canceled step is dropped.
+             (when (funcall live t)
+               (%durable-record-step run "generate" (%response-plist response)
+                                     :idempotency-key key)
+               (%on-generate run response callback error-callback)))
+           (lambda (c)
+             (when (and (funcall live t)
+                        ;; A canceled run whose request failed (the cancel
+                        ;; may be why) finishes :canceled, not as a failure.
+                        (not (%check-canceled run callback)))
+               (let* ((compact-instructions nil)
+                      (act (restart-case
+                               (progn
+                                 (signal 'agent-generate-error
+                                         :run run
+                                         :step (agent-run-step run)
+                                         :cause c
+                                         :message (princ-to-string c))
+                                 :fail)
+                             (retry ()
+                               :report "Retry GENERATE"
+                               (progn :retry))
+                             (compact-and-retry (&optional instructions)
+                               ;; 0.18.0 (#47): offered when the run has a compactor.
+                               :report "Compact the run's turns, then retry GENERATE"
+                               :test (lambda (condition)
+                                       (declare (ignore condition))
+                                       (%compactor run))
+                               :interactive (lambda ()
+                                              (format *query-io* "Summary instructions (empty for none): ")
+                                              (force-output *query-io*)
+                                              (let ((line (read-line *query-io* nil "")))
+                                                (and (plusp (length line)) (list line))))
+                               (check-type instructions (or null string))
+                               (setf compact-instructions instructions)
+                               :compact)
+                             (use-value (response)
+                               :report "Use a supplied LLM-RESPONSE"
+                               (%durable-record-step run "generate"
+                                                     (%response-plist response)
+                                                     :idempotency-key key)
+                               (%on-generate run response callback error-callback)
+                               :used)
+                             (abort ()
+                               :report "Fail the generate step"
+                               (progn :fail)))))
+                 (cond
+                   ((eq act :retry)
+                    (%discard-in-flight run)
+                    (%do-generate run callback error-callback))
+                   ((eq act :compact)
+                    (%compact-and-retry run c compact-instructions callback error-callback))
+                   ((eq act :fail)
+                    (%recover-generate run c callback error-callback))))))))))))
 
 (defun %discard-in-flight (run)
   "Drop the partial assistant turn a failed streaming step left behind."
