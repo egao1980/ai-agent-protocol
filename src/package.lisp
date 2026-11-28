@@ -260,6 +260,8 @@
    #:invoke-agent-retry
    #:agent-retryable-p
    #:auto-retry-generate
-   #:with-auto-retry-generate))
+   #:with-auto-retry-generate
+   #:retry
+   #:compact-and-retry))
 
 (in-package #:ai-agent-protocol)

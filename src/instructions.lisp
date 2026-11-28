@@ -19,6 +19,16 @@
   "Tool argument keys whose string values name paths, for the default
 TOOL-INSTRUCTION-PATHS.")
 
+(defun %default-instruction-paths (source name arguments context)
+  "TOOL-INSTRUCTION-PATHS' default: path-like TOOL-PERMISSION-RESOURCES plus
+the path values in ARGUMENTS."
+  (remove-duplicates
+   (remove-if-not #'%path-like-p
+                  (append (tool-permission-resources source name arguments
+                                                     :context context)
+                          (%argument-paths arguments)))
+   :test #'equal :from-end t))
+
 (defgeneric tool-instruction-paths (source name arguments &key context)
   (:documentation "→ list of path strings a call of NAME on SOURCE with
 ARGUMENTS reads or touches, for instruction discovery. Default: the
@@ -26,12 +36,7 @@ TOOL-PERMISSION-RESOURCES that look like paths, plus string values of
 *INSTRUCTION-PATH-KEYS* in ARGUMENTS (a JSON object string, plist or hash
 table).")
   (:method (source name arguments &key context)
-    (remove-duplicates
-     (remove-if-not #'%path-like-p
-                    (append (tool-permission-resources source name arguments
-                                                       :context context)
-                            (%argument-paths arguments)))
-     :test #'equal :from-end t)))
+    (%default-instruction-paths source name arguments context)))
 
 (defun %path-like-p (s)
   (and (stringp s)
@@ -194,3 +199,63 @@ compaction dropped). → the new directives."
             (append (agent-run-instructions-reinject run)
                     (mapcar #'steer:steer-directive-path (steer:list-directives disc))))
       (steer:forget-instructions disc))))
+
+;;; --- tool-source combinators: permission resources, instruction paths ------
+;;; 0.18.0 (#49): wrappers answer these as they answer the other tool-source
+;;; GFs, for the inner source's name of the tool, so a wrapper that only
+;;; changes results keeps the inner permission resources (a skill(NAME) deny
+;;; rule) and instruction paths. Defined here: both GFs exist by now.
+
+(defmethod tool-permission-resources ((source wrapper-tool-source) name arguments &key context)
+  (tool-permission-resources (tool-source-inner source) name arguments :context context))
+
+(defmethod tool-permission-always-resources ((source wrapper-tool-source) name arguments
+                                             &key context)
+  (tool-permission-always-resources (tool-source-inner source) name arguments :context context))
+
+(defmethod tool-instruction-paths ((source wrapper-tool-source) name arguments &key context)
+  (tool-instruction-paths (tool-source-inner source) name arguments :context context))
+
+(defmacro %define-renaming-delegates (class inner-name-form)
+  "Methods of the three GFs on CLASS that ask for INNER-NAME-FORM (NAME as the
+inner source knows it, or NIL when CLASS does not offer NAME). A name not
+offered gets the GF's default answer."
+  `(progn
+     (defmethod tool-permission-resources ((source ,class) name arguments &key context)
+       (let ((inner ,inner-name-form))
+         (if inner
+             (call-next-method source inner arguments :context context)
+             (list "*"))))
+     (defmethod tool-permission-always-resources ((source ,class) name arguments &key context)
+       (let ((inner ,inner-name-form))
+         (if inner
+             (call-next-method source inner arguments :context context)
+             (tool-permission-resources source name arguments :context context))))
+     (defmethod tool-instruction-paths ((source ,class) name arguments &key context)
+       (let ((inner ,inner-name-form))
+         (if inner
+             (call-next-method source inner arguments :context context)
+             (%default-instruction-paths source name arguments context))))))
+
+(%define-renaming-delegates prefixed-tool-source (%unprefix source name))
+
+(%define-renaming-delegates renamed-tool-source (%renamed-inner source name))
+
+(defmethod tool-permission-resources ((source combined-tool-source) name arguments &key context)
+  (let ((src (%combined-owner source name context)))
+    (if src
+        (tool-permission-resources src name arguments :context context)
+        (call-next-method))))
+
+(defmethod tool-permission-always-resources ((source combined-tool-source) name arguments
+                                             &key context)
+  (let ((src (%combined-owner source name context)))
+    (if src
+        (tool-permission-always-resources src name arguments :context context)
+        (call-next-method))))
+
+(defmethod tool-instruction-paths ((source combined-tool-source) name arguments &key context)
+  (let ((src (%combined-owner source name context)))
+    (if src
+        (tool-instruction-paths src name arguments :context context)
+        (call-next-method))))

@@ -663,31 +663,48 @@ an AGENT-TOOL-OUTPUT, or anything else (printed)."
                                  :idempotency-key key)
            (%on-generate run response callback error-callback))
          (lambda (c)
-           (let ((act (restart-case
-                          (progn
-                            (signal 'agent-generate-error
-                                    :run run
-                                    :step (agent-run-step run)
-                                    :cause c
-                                    :message (princ-to-string c))
-                            :fail)
-                        (retry ()
-                          :report "Retry GENERATE"
-                          (progn :retry))
-                        (use-value (response)
-                          :report "Use a supplied LLM-RESPONSE"
-                          (%durable-record-step run "generate"
-                                                (%response-plist response)
-                                                :idempotency-key key)
-                          (%on-generate run response callback error-callback)
-                          :used)
-                        (abort ()
-                          :report "Fail the generate step"
-                          (progn :fail)))))
+           (let* ((compact-instructions nil)
+                  (act (restart-case
+                           (progn
+                             (signal 'agent-generate-error
+                                     :run run
+                                     :step (agent-run-step run)
+                                     :cause c
+                                     :message (princ-to-string c))
+                             :fail)
+                         (retry ()
+                           :report "Retry GENERATE"
+                           (progn :retry))
+                         (compact-and-retry (&optional instructions)
+                           ;; 0.18.0 (#47): offered when the run has a compactor.
+                           :report "Compact the run's turns, then retry GENERATE"
+                           :test (lambda (condition)
+                                   (declare (ignore condition))
+                                   (%compactor run))
+                           :interactive (lambda ()
+                                          (format *query-io* "Summary instructions (empty for none): ")
+                                          (force-output *query-io*)
+                                          (let ((line (read-line *query-io* nil "")))
+                                            (and (plusp (length line)) (list line))))
+                           (check-type instructions (or null string))
+                           (setf compact-instructions instructions)
+                           :compact)
+                         (use-value (response)
+                           :report "Use a supplied LLM-RESPONSE"
+                           (%durable-record-step run "generate"
+                                                 (%response-plist response)
+                                                 :idempotency-key key)
+                           (%on-generate run response callback error-callback)
+                           :used)
+                         (abort ()
+                           :report "Fail the generate step"
+                           (progn :fail)))))
              (cond
                ((eq act :retry)
                 (%discard-in-flight run)
                 (%do-generate run callback error-callback))
+               ((eq act :compact)
+                (%compact-and-retry run c compact-instructions callback error-callback))
                ((eq act :fail)
                 (%recover-generate run c callback error-callback))))))))))
 
@@ -707,6 +724,23 @@ history never holds a call without a result."
       (setf (llm-turn-parts turn)
             (or (remove-if #'llm-tool-call-part-p (llm-turn-parts turn))
                 (list (make-llm-text-part :text "(max steps reached)")))))))
+
+(defun %compact-and-retry (run c instructions callback error-callback)
+  "The COMPACT-AND-RETRY restart (#47): compact the run's turns now, with
+INSTRUCTIONS for the summary, then GENERATE again. Nothing to compact fails
+the step with C. The step counts as compacted, so the overflow recovery does
+not compact it a second time."
+  (setf (agent-run-compacted-step run) (agent-run-step run))
+  (%discard-in-flight run)
+  (%maybe-compact run
+                  (lambda (did)
+                    (if did
+                        (%generate-with-instructions run callback error-callback)
+                        (funcall error-callback c)))
+                  error-callback
+                  :force t
+                  :reason (if (typep c 'llm-context-overflow) :overflow :manual)
+                  :instructions instructions))
 
 (defun %recover-generate (run c callback error-callback)
   "No handler recovered generate failure C. Compact once on context overflow;
@@ -806,12 +840,16 @@ summary prompt for this call only; KEY overrides the journal key (0.16.0)."
                    (setf (agent-run-turns run) new
                          (agent-run-usage-anchor run) nil)
                    (%instructions-compacted run)
+                   ;; 0.18.0 (#48): :TURNS-BEFORE is the history compacted, :REPLACED the
+                   ;; turns the summary stands for (all but the KEEP kept from the end).
                    (%emit run :compacted (list :before (length turns)
                                                :after (length new)
                                                :reason reason
                                                :summary (butlast new keep)
                                                :keep keep
-                                               :tokens-before tokens))))
+                                               :tokens-before tokens
+                                               :turns-before turns
+                                               :replaced (butlast turns keep)))))
             (multiple-value-bind (hit record)
                 (%durable-step-replayed run "compact" :idempotency-key key)
               (when hit

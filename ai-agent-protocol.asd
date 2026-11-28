@@ -1,10 +1,10 @@
 (defsystem "ai-agent-protocol"
-  :version "0.17.1"
+  :version "0.18.0"
   :description "Async-first CLOS agent protocol over llm-protocol (CL tools, invocations, approvals)"
   :author "egao1980"
   :license "MIT"
-  :depends-on ((:version "llm-protocol" "0.7.0") "event-protocol" "bordeaux-threads"
-               (:version "conversation-protocol" "0.3.0") (:version "steer-protocol" "0.3.0"))
+  :depends-on ((:version "llm-protocol" "0.8.0") "event-protocol" "bordeaux-threads"
+               (:version "conversation-protocol" "0.5.0") (:version "steer-protocol" "0.3.0"))
   :properties (:cl-repo
                (:ci (:with ("ai-agent-protocol/mcp"
                             "ai-agent-protocol/policy"
@@ -34,7 +34,7 @@
   :in-order-to ((test-op (test-op "ai-agent-protocol/tests"))))
 
 (defsystem "ai-agent-protocol/mcp"
-  :version "0.3.0"
+  :version "0.4.0"
   :description "mcp-protocol tool source + sampling handler for ai-agent-protocol"
   :author "egao1980"
   :license "MIT"
@@ -121,7 +121,7 @@
                "ai-agent-protocol/durability"
                "ai-agent-protocol/telemetry"
                "task-protocol"
-               (:version "conversation-protocol" "0.4.0")
+               (:version "conversation-protocol" "0.5.0")
                "conversation-protocol/summary"
                "event-backend-libuv"
                "json-backend-jzon"
@@ -157,7 +157,9 @@
                (:file "tool-end-test")
                ;; 0.17.0 (H3e-2b)
                (:file "deferred-test")
-               (:file "sampling-handler-test"))
+               (:file "sampling-handler-test")
+               ;; 0.18.0
+               (:file "backlog-018-test"))
   :perform (test-op (o c)
              (unless (symbol-call :rove :run c)
                (error "tests failed for ~A" (component-name c)))))

@@ -144,19 +144,24 @@ as given), audio → \"[audio omitted]\", else its text."
     "content" (mcp-protocol:make-text-content (or (llm-response-text response) ""))
     "stopReason" (%stop-reason (llm-response-finish-reason response))))
 
-(defun make-mcp-sampling-handler (&key (backend llm-protocol:*llm-backend*) model max-tokens)
+(defun make-mcp-sampling-handler (&key (backend llm-protocol:*llm-backend*) model max-tokens
+                                       on-response)
   "Host create-message → GENERATE. Not an llm-protocol concern. MODEL is
 GENERATE's :MODEL (never the request's hints); MAX-TOKENS caps maxTokens
-(0.3.0, see the header)."
+(0.3.0, see the header). ON-RESPONSE (0.4.0), when given, is called with the
+request PARAMS and the LLM-RESPONSE before the result is built, so a host can
+account for the sample's usage without wrapping BACKEND."
   (lambda (params)
-    (llm-response->mcp-create-message
-     (generate (or backend llm-protocol:*llm-backend*)
-               (%sampling-turns params)
-               :model model
-               :settings (%sampling-settings params max-tokens)
-               :tools (%sampling-slot params "tools"
-                                      #'mcp-protocol::mcp-sampling-request-tools)
-               :tool-choice (%sampling-slot params "toolChoice"
-                                            #'mcp-protocol::mcp-sampling-request-tool-choice))
-     model)))
+    (let ((response
+            (generate (or backend llm-protocol:*llm-backend*)
+                      (%sampling-turns params)
+                      :model model
+                      :settings (%sampling-settings params max-tokens)
+                      :tools (%sampling-slot params "tools"
+                                             #'mcp-protocol::mcp-sampling-request-tools)
+                      :tool-choice (%sampling-slot params "toolChoice"
+                                                   #'mcp-protocol::mcp-sampling-request-tool-choice))))
+      (when on-response
+        (funcall on-response params response))
+      (llm-response->mcp-create-message response model))))
 

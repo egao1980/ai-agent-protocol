@@ -313,31 +313,13 @@ invocation whose result tells the model why (or a handler's USE-VALUE text).
 
 ;;; --- rule 5: manual compaction -----------------------------------------------
 
-(defun %prompt-accessor (memory)
-  "The summary prompt reader applicable to MEMORY, or NIL. Reached at run time
-only: its methods live in conversation-protocol/summary, which the core system
-does not depend on."
-  (let ((name 'conversation:summary-memory-prompt))
-    (and (fboundp name)
-         (fboundp (list 'setf name))
-         (compute-applicable-methods (fdefinition name) (list memory))
-         name)))
-
 (defun %compact-turns-with (memory turns backend instructions)
-  "CONVERSATION:COMPACT-TURNS, with INSTRUCTIONS appended to MEMORY's summary
-prompt for this call only (restored on any exit)."
-  (let ((accessor (and instructions (%prompt-accessor memory))))
-    (if (null accessor)
-        (conversation:compact-turns memory turns :backend backend)
-        (let ((setter (fdefinition (list 'setf accessor)))
-              (old (funcall accessor memory)))
-          (unwind-protect
-               (progn
-                 (funcall setter
-                          (format nil "~@[~a~]~c~c~a" old #\Newline #\Newline instructions)
-                          memory)
-                 (conversation:compact-turns memory turns :backend backend))
-            (funcall setter old memory))))))
+  "CONVERSATION:COMPACT-TURNS with INSTRUCTIONS for this call only
+(conversation-protocol 0.5.0 :INSTRUCTIONS, #46): MEMORY's own prompt is never
+changed, so other runs sharing MEMORY do not see them."
+  (if instructions
+      (conversation:compact-turns memory turns :backend backend :instructions instructions)
+      (conversation:compact-turns memory turns :backend backend)))
 
 (defgeneric compact-agent-run (run &key callback error-callback instructions)
   (:documentation "Compact an idle RUN's turns now (rule 5 in src/resilience.lisp).")
